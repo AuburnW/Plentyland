@@ -61,3 +61,4 @@ exclude:
   - ext/popup.html
   - ext/popup.js
   - "*.json"
+  - README.md
