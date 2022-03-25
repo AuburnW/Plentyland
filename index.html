@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+
+<head>
+	<meta charset="UTF-8">
+	<title>Plentyland</title>
+	<style>
+		body {
+			color: #eee;
+			background-color: #000;
+			font-family: sans-serif;
+			margin: 0;
+			padding: 10px;
+		}
+
+		body>* {
+			max-width: 650px;
+		}
+
+		h1 {
+			margin: 0 auto 0;
+		}
+
+		p,
+		ul,
+		ol {
+			margin: 10px auto 20px;
+		}
+
+		ol {
+			background-color: #171717;
+			border-color: #171717;
+			border-radius: 10px;
+			padding: 10px 10px 10px 30px;
+		}
+
+		li {
+			margin: 10px 0;
+		}
+
+		button {
+			font-size: 1.1em;
+			border-style: solid;
+			border-radius: 7px;
+			border-width: 2;
+			border-color: #eee;
+			color: #eee;
+			background: none;
+			box-shadow: none;
+		}
+
+		button:active {
+			background-color: #666;
+		}
+
+		code,
+		#inject {
+			font-family: monospace;
+			background-color: #431;
+			border-color: #431;
+			border-radius: 5px;
+			border-style: solid;
+		}
+
+		#inject {
+			word-break: break-all;
+		}
+	</style>
+</head>
+
+<body>
+	<h1>Plentyland</h1>
+	<p>Play Manyland with modern fixes.</p>
+	<ol>
+		<li>
+			Copy this text:
+			<p id="inject">
+				-javascript:fetch("https://plentyland.github.io/ext/a.js").then(a=>a.text()).then(a=>eval(a))
+			</p>
+			<p><button onclick="onClick()">Copy</button>
+			</p>
+		</li>
+		<li>On a Manyland tab, paste the text into the address bar (where you type in websites)</li>
+		<li>Delete the <code>-</code> before <code>javascript:</code></li>
+		<li>Hit enter</li>
+	</ol>
+	<p>
+		If successful, your character will say "Plentyland active." You will have to follow
+		these steps every time the game loads, such as after resizing the window, or going to
+		another area.
+	</p>
+	<p>
+		On some browsers, you can save the copied text as a bookmark (with the <code>-</code> removed). Then, you can
+		simply open the bookmark to activate plentyland.
+	</p>
+	<h1>Fixes</h1>
+	<ul>
+		<li>Sounds play reliably</li>
+		<li>Audio is clean, even when it's loud</li>
+		<li>Instruments are fully responsive shortly after the first note is played</li>
+		<li>More to come (hopefully!)</li>
+	</ul>
+	<script>
+		let last = -1;
+		const button = document.getElementsByTagName("button")[0];
+		const previousText = button.textContent;
+		function onClick() {
+			navigator.clipboard.writeText(document.getElementById('inject').textContent);
+			button.textContent = "Copied!";
+			clearTimeout(last);
+			last = setTimeout(() => button.textContent = previousText, 2000);
+		}
+	</script>
+</body>
+
+</html>

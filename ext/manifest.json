@@ -1,0 +1,19 @@
+{
+	"manifest_version": 3,
+	"name": "Plentyland",
+	"version": "0.1",
+	"description": "Enhancements for Manyland",
+	"icons": {
+		"128": "icon.png"
+	},
+	"permissions": [
+		"scripting"
+	],
+	"host_permissions": [
+		"http://manyland.com/*",
+		"https://manyland.com/*"
+	],
+	"action": {
+		"default_popup": "popup.html"
+	}
+}

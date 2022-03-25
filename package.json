@@ -1,0 +1,17 @@
+{
+  "name": "manyclient",
+  "version": "0.0.1",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "extract": "node dev/extract-manyland.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "js-beautify": "^1.14.0"
+  },
+  "devDependencies": {
+    "@types/node": "^17.0.21"
+  }
+}

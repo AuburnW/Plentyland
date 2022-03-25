@@ -1,0 +1,10 @@
+dev/manyland.txt
+dev/out/
+node_modules/
+
+_site/
+.sass-cache/
+.jekyll-cache/
+.jekyll-metadata
+.bundle/
+vendor/
