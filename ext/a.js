@@ -1,5 +1,5 @@
 /** @type {any} */
-var ig;
+var ig = /** @type {any} */ (window).ig;
 
 (() => {
 	try {
