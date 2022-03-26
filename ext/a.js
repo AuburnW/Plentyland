@@ -1,13 +1,8 @@
-if (window.plentyland) {
-	throw new Error("Plentyland is already active!");
-}
-
 // Core functionality for Plentyland
 ig.module("plugins.plentyland").requires(
 	"game.main",
 	"impact.sound"
 ).defines(() => {
-
 	window.plentyland = ig.Class.extend({});
 
 	/**
@@ -38,6 +33,7 @@ ig.module("plugins.plentyland").requires(
 	plentyland.player.say("plentyland active");
 });
 
+// Audio fixes
 ig.module("plugins.plentyland.audio").requires(
 	"plugins.plentyland",
 	"plugins.mland-soundextensions",
