@@ -2,7 +2,6 @@
 	"compilerOptions": {
 		"checkJs": true,
 		"target": "ES2021",
-		"noImplicitAny": true,
 		"noUncheckedIndexedAccess": true,
 		"strictNullChecks": true,
 		"module": "CommonJS",
