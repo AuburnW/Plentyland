@@ -14,4 +14,7 @@
 		"ext/**/*",
 		"dev/extract-manyland.js"
 	],
+	"exclude": [
+		"node_modules/**/*"
+	]
 }

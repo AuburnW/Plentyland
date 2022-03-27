@@ -15,5 +15,16 @@
 	],
 	"action": {
 		"default_popup": "popup.html"
-	}
+	},
+	"web_accessible_resources": [
+		{
+			"resources": [
+				"worker.js"
+			],
+			"matches": [
+				"*://manyland.com/*"
+			],
+			"use_dynamic_url": true
+		}
+	]
 }
