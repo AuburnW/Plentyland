@@ -450,7 +450,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @param {number} y 
 		 */
 		translate(x, y) {
-
+			logDraw({ translate: [x, y] });
 		}
 
 		/**
@@ -458,7 +458,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @param {number} radians
 		 */
 		rotate(radians) {
-
+			logDraw({ rotate: [radians] });
 		}
 
 		/**
@@ -472,6 +472,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @returns 
 		 */
 		createRadialGradient(x0, y0, r0, x1, y1, r1) {
+			logDraw({ createRadialGradient: [x0, y0, r0, x1, y1, r1] });
 			return new PlentyGradient();
 		}
 
@@ -483,6 +484,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @param {number} y1 
 		 */
 		createLinearGradient(x0, y0, x1, y1) {
+			logDraw({ createLinearGradient: [x0, y0, x1, y1] });
 			return new PlentyGradient();
 		}
 
@@ -492,7 +494,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @param {number} y 
 		 */
 		moveTo(x, y) {
-
+			logDraw({ moveTo: [x, y] });
 		}
 
 		/**
@@ -505,7 +507,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @param {boolean=} counterClockwise 
 		 */
 		arc(x, y, radius, startRadians, endRadians, counterClockwise) {
-
+			logDraw({ arc: [x, y, radius, startRadians, endRadians, counterClockwise] });
 		}
 
 		/**
@@ -514,7 +516,11 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @param {number} y 
 		 */
 		lineTo(x, y) {
+			logDraw({ lineTo: [x, y] });
+		}
 
+		clip(fillRuleOrPath, fillRule) {
+			logDraw({ clip: [fillRuleOrPath, fillRule] });
 		}
 	}
 	class PlentyGradient {
