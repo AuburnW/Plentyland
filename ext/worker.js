@@ -208,7 +208,7 @@
 			};
 			gl.bufferData(
 				gl.ARRAY_BUFFER,
-				new Int16Array(geometry, 0, geometryLength),
+				new Uint8Array(geometry, 0, geometryLength),
 				gl.DYNAMIC_DRAW
 			);
 			drawLength = vertexCount;
