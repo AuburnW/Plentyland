@@ -562,6 +562,16 @@ ig.module("plugins.plentyland.graphics").requires(
 		}
 	}
 
+	/**
+	 * @typedef {{
+	 * 		node: AtlasNode,
+	 * 		index: number,
+	 * 		level: number,
+	 * 		x: number,
+	 * 		y: number,
+	 * }} AtlasStackEntry
+	 */
+
 	// Atlas Allocation
 
 	/**
@@ -571,8 +581,53 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * @param {number} height
 	 */
 	function allocateAtlas(allocation, width, height) {
-		const level = Math.ceil(Math.log2(Math.max(width, height))) | 0;
-		findAllocation(baseNode, textureSizeMagnitude - 1, level, 0, 0, allocation);
+		const targetLevel = Math.ceil(Math.log2(Math.max(width, height))) | 0;
+		/** @type {AtlasStackEntry[]} */
+		const stack = [{
+			node: baseNode,
+			index: 0,
+			level: textureSizeMagnitude - 1,
+			x: 0,
+			y: 0
+		}];
+		while (true) {
+			const entry = stack.pop();
+			if (!entry) { break; }
+			const { node, index, level, x, y } = entry;
+			const subNode = node[index];
+			const newX = x + ((index & 1) << level);
+			const newY = y + ((index >> 1) << level);
+			/** @type {AtlasNode?} */
+			let newNode = null;
+			if (subNode) {
+				if (subNode instanceof Array && level > targetLevel) {
+					newNode = subNode;
+				}
+			} else {
+				if (level <= targetLevel) {
+					allocation.x = newX;
+					allocation.y = newY;
+					node[index] = allocation;
+					break;
+				} else {
+					newNode = [null, null, null, null];
+					node[index] = newNode;
+				}
+			}
+			if (newNode) {
+				stack.push({
+					node: newNode,
+					index: 0,
+					level: level - 1,
+					x: newX,
+					y: newY
+				});
+			}
+			entry.index++;
+			if (entry.index < 4) {
+				stack.push(entry);
+			}
+		}
 		allocation.allocated = true;
 	}
 
@@ -594,61 +649,6 @@ ig.module("plugins.plentyland.graphics").requires(
 
 	/** @type {AtlasNode} */
 	const baseNode = [null, null, null, null];
-
-	/**
-	 * @param {AtlasNode} node 
-	 * @param {number} level
-	 * @param {number} targetLevel 
-	 * @param {number} x 
-	 * @param {number} y 
-	 * @param {AtlasAllocation} allocation 
-	 * @return {boolean}
-	 */
-	function findAllocation(node, level, targetLevel, x, y, allocation) {
-		for (let i = 0; i < node.length; i++) {
-			const subNode = node[i];
-			const newX = x + ((i & 1) << level);
-			const newY = y + ((i >> 1) << level);
-			if (subNode) {
-				if (subNode instanceof Array && level > targetLevel) {
-					const result = findAllocation(
-						subNode,
-						level - 1,
-						targetLevel,
-						newX,
-						newY,
-						allocation
-					);
-					if (result) {
-						return true;
-					}
-				}
-			} else {
-				if (level <= targetLevel) {
-					allocation.x = newX;
-					allocation.y = newY;
-					node[i] = allocation;
-					return true;
-				} else {
-					/** @type {AtlasNode} */
-					const newNode = [null, null, null, null];
-					node[i] = newNode;
-					const result = findAllocation(
-						newNode,
-						level - 1,
-						targetLevel,
-						newX,
-						newY,
-						allocation
-					);
-					if (result) {
-						return true;
-					}
-				}
-			}
-		}
-		return false;
-	}
 
 	// Draw
 
