@@ -263,15 +263,13 @@ ig.module("plugins.plentyland.graphics").requires(
 	/** @type {HTMLCanvasElement} */
 	const offscreenCanvas = /** @type {any} */(canvas).transferControlToOffscreen();
 	const textureSizeMagnitude = 11;
-	const screenSpaceFactor = 8;
-	const scaleFactor = 2 * 32768 / screenSpaceFactor;
+	const scaleFactor = 2;
 
 	sendWorkerCommand(
 		"initialize",
 		[/** @type {any} */(offscreenCanvas)],
 		offscreenCanvas,
-		textureSizeMagnitude,
-		screenSpaceFactor
+		textureSizeMagnitude
 	);
 
 	let drawCount = 500;
@@ -536,7 +534,7 @@ ig.module("plugins.plentyland.graphics").requires(
 	/** @type {ClientCommands} */
 	const clientCommands = {
 		returnBuffer: buffer => {
-			geometryBuffer = new Int16Array(buffer);
+			geometryBuffer = new DataView(buffer);
 		}
 	}
 	worker.onmessage = message => {
@@ -661,6 +659,8 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * @param {number} v2 
 	 */
 	function drawRectangle(x1, y1, x2, y2, deltaX, deltaY, u1, v1, u2, v2) {
+		if (geometryBuffer.buffer.byteLength === 0) { return; }
+
 		// Triangle 1
 		drawVertex(x1, y1, deltaX, deltaY, u1, v2);
 		drawVertex(x1, y2, deltaX, deltaY, u1, v1);
@@ -700,7 +700,7 @@ ig.module("plugins.plentyland.graphics").requires(
 				"loadGeometry",
 				[buffer],
 				buffer,
-				Math.min(geometryIndex, geometryBuffer.length),
+				Math.min(geometryIndex, geometryBuffer.byteLength),
 				vertexCount,
 				startTime,
 				factor
@@ -713,11 +713,11 @@ ig.module("plugins.plentyland.graphics").requires(
 	// Geometry parameters
 
 	const maxQuads = 2048;
-	const vertexSize = 6;
+	const vertexSize = 20;
 	const triangleSize = 3 * vertexSize;
 	const quadSize = 2 * triangleSize;
 	const bufferSize = maxQuads * quadSize;
-	let geometryBuffer = new Int16Array(bufferSize);
+	let geometryBuffer = new DataView(new ArrayBuffer(bufferSize));
 	let geometryIndex = 0;
 
 	let vertexCount = 0;
@@ -731,6 +731,8 @@ ig.module("plugins.plentyland.graphics").requires(
 	let deltaX = 0;
 	let deltaY = 0;
 
+	const littleEndian = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
 	/**
 	 * 
 	 * @param {number} x 
@@ -741,12 +743,23 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * @param {number} v 
 	 */
 	function drawVertex(x, y, deltaX, deltaY, u, v) {
-		geometryBuffer[geometryIndex++] = x;
-		geometryBuffer[geometryIndex++] = y;
-		geometryBuffer[geometryIndex++] = deltaX;
-		geometryBuffer[geometryIndex++] = deltaY;
-		geometryBuffer[geometryIndex++] = u;
-		geometryBuffer[geometryIndex++] = v;
+		geometryBuffer.setFloat32(geometryIndex, x, littleEndian);
+		geometryIndex += 4;
+
+		geometryBuffer.setFloat32(geometryIndex, y, littleEndian);
+		geometryIndex += 4;
+
+		geometryBuffer.setFloat32(geometryIndex, deltaX, littleEndian);
+		geometryIndex += 4;
+
+		geometryBuffer.setFloat32(geometryIndex, deltaY, littleEndian);
+		geometryIndex += 4;
+
+		geometryBuffer.setInt16(geometryIndex, u, littleEndian);
+		geometryIndex += 2;
+
+		geometryBuffer.setInt16(geometryIndex, v, littleEndian);
+		geometryIndex += 2;
 	}
 
 	const msPerTick = 1000 / updatesPerSecond;

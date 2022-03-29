@@ -31,7 +31,7 @@
 
 	/** @type {WorkerCommands} */
 	const workerCommands = {
-		initialize: (offscreenCanvas, textureMagnitude, screenSpaceFactor) => {
+		initialize: (offscreenCanvas, textureMagnitude) => {
 			textureSizeMagnitude = textureMagnitude;
 			textureSize = 1 << textureSizeMagnitude;
 
@@ -66,9 +66,6 @@
 				"void main(){" +
 				// Final position.
 				"vec2 f=a+b*e;" +
-				// Convert position to screen space.
-				"f.x*=" + screenSpaceFactor.toFixed(20) + ";" +
-				"f.y*=" + screenSpaceFactor.toFixed(20) + ";" +
 				// Set position output.
 				"gl_Position=vec4(f.xy,0.0,1.0);" +
 				// Convert texture coordinates to texture space.
@@ -152,11 +149,11 @@
 				// Number of components
 				2,
 				// Vertex type
-				gl.SHORT,
+				gl.FLOAT,
 				// Normalize
-				true,
+				false,
 				// Stride
-				12,
+				20,
 				// Offset
 				0
 			);
@@ -169,13 +166,13 @@
 				// Number of components
 				2,
 				// Vertex type
-				gl.SHORT,
+				gl.FLOAT,
 				// Normalize
-				true,
+				false,
 				// Stride
-				12,
+				20,
 				// Offset
-				4
+				8
 			);
 			gl.enableVertexAttribArray(vertexDeltaPosition);
 
@@ -189,9 +186,9 @@
 				// Normalize
 				false,
 				// Stride
-				12,
+				20,
 				// Offset
-				8
+				16
 			);
 			gl.enableVertexAttribArray(textureCoordinates);
 			gl.useProgram(shaderProgram);
@@ -282,7 +279,6 @@
  * 		initialize: (
  * 			offscreenCanvas: HTMLCanvasElement,
  * 			textureMagnitude: number,
- * 			screenSpaceFactor: number
  * 		) => void,
  * 		loadGeometry: (
  * 			geometry: ArrayBuffer,
