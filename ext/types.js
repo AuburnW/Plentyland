@@ -14,3 +14,6 @@ var consoleref;
 
 /** @type {any} */
 var Item;
+
+/** @type {any} */
+var MLand;

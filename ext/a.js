@@ -18,11 +18,11 @@ ig.module("plugins.plentyland").requires(
 	/**
 	 * Asserts that the given value is an instance of the given type, then returns the value.
 	 * @param {any} value 
-	 * @param {Function} type 
+	 * @param {Function|"number"|"boolean"|"function"|"string"|"object"|"undefined"} type 
 	 * @returns {any}
 	 */
 	function checkType(value, type) {
-		if (!(value instanceof type)) {
+		if (typeof value !== type && typeof type !== "string" && !(value instanceof type)) {
 			throw new Error("Plentyland needs to update obfuscation bindings");
 		}
 		return value;
@@ -37,6 +37,10 @@ ig.module("plugins.plentyland").requires(
 	plentyland.soundManager = checkType(ig.O2212, plentyland.soundManagerClass);
 	plentyland.brainManagerOnSound = checkType(ig.game.brainManager.O5925, Function)
 		.bind(ig.game.brainManager);
+	plentyland.cancelLoop = "O884";
+	checkType(ig[plentyland.cancelLoop], Function);
+	plentyland.cancelId = "O869";
+	checkType(ig.system[plentyland.cancelId], "number");
 
 	// Finish
 
@@ -226,12 +230,21 @@ ig.module("plugins.plentyland.audio").requires(
 
 // A reimplementation of the graphics engine to use WebGL in a worker. The game now draws at a much
 // lower framerate, but interpolates between frames. This results in a huge performance win, 
-// making the game viable on much more hardware.
+// making the game viable on much more hardware while still feeling smooth.
+// The lower update rate causes some issues with code that assumes 60fps.
 ig.module("plugins.plentyland.graphics").requires(
 	"plugins.plentyland"
 ).defines(() => fetch(String(new URL("worker.js", plentyland.root))).then(r => r.blob()).then(v => {
+
+	// This how often the game is drawn. WebGL interpolates between draws.
+	const updatesPerSecond = 20;
+
+	// Cancel main game loop (we will be implementing our own)
+	ig[plentyland.cancelLoop](ig.system[plentyland.cancelId]);
+
 	const workerURL = URL.createObjectURL(v);
 	const worker = new Worker(workerURL);
+
 
 	// Inject our own canvas implementation
 	/** @type {HTMLCanvasElement?} */
@@ -249,8 +262,8 @@ ig.module("plugins.plentyland.graphics").requires(
 
 	/** @type {HTMLCanvasElement} */
 	const offscreenCanvas = /** @type {any} */(canvas).transferControlToOffscreen();
-	const textureSizeMagnitude = 12;
-	const screenSpaceFactor = 4;
+	const textureSizeMagnitude = 11;
+	const screenSpaceFactor = 8;
 	const scaleFactor = 2 * 32768 / screenSpaceFactor;
 
 	sendWorkerCommand(
@@ -261,19 +274,6 @@ ig.module("plugins.plentyland.graphics").requires(
 		screenSpaceFactor
 	);
 
-	ig.Game.inject({
-		/**
-		 * @this {any}
-		 */
-		run: function () {
-			xFactor = scaleFactor / canvas.width;
-			yFactor = -scaleFactor / canvas.height;
-			xOffset = canvas.width * -0.5;
-			yOffset = canvas.height * -0.5;
-			this.parent();
-			sendInterpolation(Date.now(), 0);
-		},
-	});
 	let drawCount = 500;
 	function logDraw(value) {
 		if (drawCount-- > 0) {
@@ -283,7 +283,7 @@ ig.module("plugins.plentyland.graphics").requires(
 
 	/**
 	 * @typedef {{
-	 * 		pl_allocation?: AtlasAllocation,
+	 * 		pl_allocation?: Map<number,AtlasAllocation>,
 	 * } & HTMLCanvasElement} PlentyCanvas
 	 */
 
@@ -307,20 +307,34 @@ ig.module("plugins.plentyland.graphics").requires(
 			if (image instanceof HTMLCanvasElement && dwOrSw !== undefined && dx !== undefined) {
 				/** @type {PlentyCanvas} */
 				const canvas = image;
-				let allocation = canvas.pl_allocation;
+				let allocationMap = canvas.pl_allocation;
+				const sourceX = Math.max(Math.floor(dxOrSx), 0);
+				const sourceY = Math.max(Math.floor(dyOrSy), 0);
+				const sourceWidth = Math.min(Math.ceil(dwOrSw), image.width);
+				const sourceHeight = Math.min(Math.ceil(dhOrSh), image.height);
+
+				if (allocationMap === undefined) {
+					allocationMap = canvas.pl_allocation = new Map();
+				}
+				const hashRange = 1 << 12;
+				const allocationHash = (
+					(sourceX * hashRange + sourceY) * hashRange + sourceWidth
+				) * hashRange + sourceHeight;
+				let allocation = allocationMap.get(allocationHash);
 				if (allocation === undefined) {
 					allocation = {
 						allocated: false,
 						x: 0,
 						y: 0
 					};
-					canvas.pl_allocation = allocation;
+					allocationMap.set(allocationHash, allocation);
 				}
 				if (!allocation.allocated) {
 					const context = canvas.getContext("2d");
 					if (!context) { throw new Error("Unable to create context") }
-					const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+					const pixels = context.getImageData(sourceX, sourceY, sourceWidth, sourceHeight);
 					allocateAtlas(allocation, pixels.width, pixels.height);
+					consoleref.log(`Loaded a ${pixels.width}x${pixels.height} image at (${allocation.x}, ${allocation.y})`);
 					sendWorkerCommand(
 						"uploadToAtlas",
 						[pixels.data.buffer],
@@ -331,21 +345,49 @@ ig.module("plugins.plentyland.graphics").requires(
 						allocation.y
 					);
 				}
-				if (dxOrSx < 0 || dw < 0) {
-					debugger;
-				}
-				const x1 = (xOffset + dx) * xFactor;
-				const y1 = (yOffset + dy) * yFactor;
-				const x2 = x1 + (dw * xFactor);
-				const y2 = y1 + (dh * yFactor);
-				const u1 = allocation.x + dxOrSx;
-				const v1 = allocation.y + dyOrSy;
+				const x1 = (xOffset + dx) * xScaleCanvas;
+				const y1 = (yOffset + dy) * yScaleCanvas;
+				const x2 = x1 + (dw * xScaleCanvas);
+				const y2 = y1 + (dh * yScaleCanvas);
+				const u1 = allocation.x + dxOrSx - sourceX;
+				const v1 = allocation.y + dyOrSy - sourceY;
 				const u2 = u1 + dwOrSw;
 				const v2 = v1 + dhOrSh;
-				drawRectangle(x1, y1, x2, y2, 0, 0, u1, v2, u2, v1);
+				let imageDeltaX = deltaX;
+				let imageDeltaY = deltaY;
+				if (interpolation !== null) {
+					if (interpolation.capacity - 2 <= interpolation.index) {
+						interpolation.capacity += 2;
+						if (interpolation.capacity > interpolation.points.length) {
+							const newPoints = new Float64Array(interpolation.capacity * 2);
+							newPoints.set(interpolation.points);
+							interpolation.points = newPoints;
+						}
+					} else {
+						imageDeltaX = x1 - /** @type {number} */(
+							interpolation.points[interpolation.index]
+						);
+						imageDeltaY = y1 - /** @type {number} */(
+							interpolation.points[interpolation.index + 1]
+						);
+					}
+					interpolation.points[interpolation.index++] = x1;
+					interpolation.points[interpolation.index++] = y1;
+				}
+				drawRectangle(
+					x1 - imageDeltaX,
+					y1 - imageDeltaY,
+					x2 - imageDeltaX,
+					y2 - imageDeltaY,
+					imageDeltaX,
+					imageDeltaY,
+					u1,
+					v2,
+					u2,
+					v1
+				);
 			} else {
-				throw new Error();
-				logDraw("context.drawImage");
+				throw new Error("Can't draw an image in that way.");
 			}
 		}
 		/**
@@ -402,6 +444,89 @@ ig.module("plugins.plentyland.graphics").requires(
 		 */
 		fill(ruleOrPath, rule) {
 			logDraw({ fill: [ruleOrPath, rule] });
+		}
+
+		/**
+		 * 
+		 * @param {number} x 
+		 * @param {number} y 
+		 */
+		translate(x, y) {
+
+		}
+
+		/**
+		 * 
+		 * @param {number} radians
+		 */
+		rotate(radians) {
+
+		}
+
+		/**
+		 * 
+		 * @param {number} x0 
+		 * @param {number} y0 
+		 * @param {number} r0 
+		 * @param {number} x1 
+		 * @param {number} y1 
+		 * @param {number} r1 
+		 * @returns 
+		 */
+		createRadialGradient(x0, y0, r0, x1, y1, r1) {
+			return new PlentyGradient();
+		}
+
+		/**
+		 * 
+		 * @param {number} x0 
+		 * @param {number} y0 
+		 * @param {number} x1 
+		 * @param {number} y1 
+		 */
+		createLinearGradient(x0, y0, x1, y1) {
+			return new PlentyGradient();
+		}
+
+		/**
+		 * 
+		 * @param {number} x 
+		 * @param {number} y 
+		 */
+		moveTo(x, y) {
+
+		}
+
+		/**
+		 * 
+		 * @param {number} x 
+		 * @param {number} y 
+		 * @param {number} radius 
+		 * @param {number} startRadians 
+		 * @param {number} endRadians 
+		 * @param {boolean=} counterClockwise 
+		 */
+		arc(x, y, radius, startRadians, endRadians, counterClockwise) {
+
+		}
+
+		/**
+		 * 
+		 * @param {number} x 
+		 * @param {number} y 
+		 */
+		lineTo(x, y) {
+
+		}
+	}
+	class PlentyGradient {
+		/**
+		 * 
+		 * @param {number} offset 
+		 * @param {string} color 
+		 */
+		addColorStop(offset, color) {
+
 		}
 	}
 
@@ -549,6 +674,20 @@ ig.module("plugins.plentyland.graphics").requires(
 		vertexCount += 6;
 	}
 
+	function drawQuad(x1, y1, dx1, dy1, u1, v1, x2, y2, dx2, dy2, u2, v2, x3, y3, dx3, dy3, u3, v3, x4, y4, dx4, dy4, u4, v4) {
+		// Triangle 1
+		drawVertex(x1, y1, dx1, deltaY, u1, v2);
+		drawVertex(x1, y2, deltaX, deltaY, u1, v1);
+		drawVertex(x2, y1, deltaX, deltaY, u2, v2);
+
+		// Triangle 2
+		drawVertex(x1, y2, deltaX, deltaY, u1, v1);
+		drawVertex(x2, y2, deltaX, deltaY, u2, v1);
+		drawVertex(x2, y1, deltaX, deltaY, u2, v2);
+
+		vertexCount += 6;
+	}
+
 	/**
 	 * 
 	 * @param {number} startTime 
@@ -571,10 +710,6 @@ ig.module("plugins.plentyland.graphics").requires(
 		vertexCount = 0;
 	}
 
-	function canDraw() {
-		return geometryBuffer.byteLength !== 0;
-	}
-
 	// Geometry parameters
 
 	const maxQuads = 2048;
@@ -587,10 +722,14 @@ ig.module("plugins.plentyland.graphics").requires(
 
 	let vertexCount = 0;
 
-	let xFactor = 0;
-	let yFactor = 0;
+	let xScaleCanvas = 0;
+	let yScaleCanvas = 0;
 	let xOffset = 0;
 	let yOffset = 0;
+	let previousScreenX = ig.game.screen.x;
+	let previousScreenY = ig.game.screen.y;
+	let deltaX = 0;
+	let deltaY = 0;
 
 	/**
 	 * 
@@ -610,55 +749,126 @@ ig.module("plugins.plentyland.graphics").requires(
 		geometryBuffer[geometryIndex++] = v;
 	}
 
-	// Reimplement Manyland draw methods.
+	const msPerTick = 1000 / updatesPerSecond;
+	const deltaTime = 1 / updatesPerSecond;
+	const interpolationFactor = updatesPerSecond / 1000;
+	function gameLoop() {
+		ig.system.run();
+		sendInterpolation(tickCount * msPerTick, interpolationFactor);
+		tickCount++;
+		let waitTime = msPerTick * tickCount - Date.now();
+		if (waitTime < -500) {
+			tickCount = Math.ceil(Date.now() / msPerTick);
+			waitTime = msPerTick * tickCount - Date.now();
+		}
+		setTimeout(gameLoop, waitTime);
+	}
+	let tickCount = Math.ceil(Date.now() / msPerTick);
+	setTimeout(gameLoop, msPerTick * tickCount - Date.now());
+	Object.defineProperties(ig.system, {
+		tick: {
+			get: function () { return deltaTime; }
+		},
+		fps: {
+			get: function () { return 60; }
+		}
+	});
 
-	// ml.Image.prototype.draw =
-	// 	function (a, b, c, d, e, f) {
-	// 		logDraw("Drew ml.Image via draw");
-	// 		return;
-	// 		if (this.loaded) {
-	// 			var g = ig.system.scale;
-	// 			e = (e ? e : this.width) * g;
-	// 			f = (f ? f : this.height) * g;
-	// 			ig.system.context.drawImage(this.data, c ? c * g : 0, d ? d * g : 0, e, f, ig.system.O5949(a), ig.system.O5949(b), e, f)
-	// 		}
-	// 	};
-	// ml.Image.prototype.O4775 = function (a, b, c, d, e, f, g) {
-	// 	logDraw("Drew ml.Image via O4775");
-	// 	return;
-	// 	e = e ? e : d;
-	// 	if (this.loaded && !(d > this.width || e > this.height)) {
-	// 		var h = ig.system.scale,
-	// 			k = Math.floor(d * h),
-	// 			l = Math.floor(e * h),
-	// 			m = f ? -1 : 1,
-	// 			n = g ? -1 : 1;
-	// 		if (f || g) ig.system.context.save(), ig.system.context.scale(m, n);
-	// 		ig.system.context.drawImage(this.data, Math.floor(c *
-	// 			d) % this.width * h, Math.floor(c * d / this.width) * e * h, k, l, ig.system.O5949(a) * m - (f ? k : 0), ig.system.O5949(b) * n - (g ? l : 0), k, l);
-	// 		(f || g) && ig.system.context.restore()
-	// 	}
-	// };
-	// ml.Image.prototype.O3081 = function (a, b, c, d, e, f, g, h) {
-	// 	logDraw("Drew ml.Image via O3081");
-	// 	return;
-	// 	if (this.loaded) {
-	// 		var k = ig.system.scale;
-	// 		ig.system.context.drawImage(this.data, e ? e * k : 0, f ? f * k : 0, g * k, h * k, ig.system.O5949(a), ig.system.O5949(b), c * k, d * k)
-	// 	}
-	// };
+	/**
+	 * @typedef {{
+	 * 		pl_interpolation?: Interpolation
+	 * }} HasInterpolation
+	 */
 
-	// window.Item.prototype.draw = function (a, b, c, d, e, f) {
-	// 	logDraw("Drew Item via draw");
-	// 	return;
-	// 	1 !== e && (ig.system.context.globalAlpha = e);
-	// 	c = c || 0;
-	// 	d = d || 0;
-	// 	a = ig.system.O5949(a);
-	// 	b = ig.system.O5949(b);
-	// 	this.needsOffsetDuringDrag && (this.scaledWidth = this.img.width / 2 * ig.system.scale, a -= this.img.width / 4, b -= this.img.height / 2);
-	// 	this.imagesGenerated && (c = this.getImageDataCanvasForDraw(c, d), this.O1455() ? ig.system.context.drawImage(c, 0, 0, this.scaledWidth, this.scaledHeight, a, b, this.scaledWidth, this.scaledHeight) : (c || console.log("rotated image data is null! - is this a non-rotatable item with rotation set?"), ig.system.context.drawImage(c, 0, 0, this.scaledWidth, this.scaledHeight, a,
-	// 		b, this.scaledWidth, this.scaledHeight), f && (ig.system.context.globalAlpha = 1, ig.system.context.drawImage(c, f * this.scaledWidth, 0, this.scaledWidth, this.scaledHeight, a, b, this.scaledWidth, this.scaledHeight))));
-	// 	1 !== e && (ig.system.context.globalAlpha = 1)
-	// };
+	/** 
+	 * @typedef {{
+	 * 		lastTick: number,
+	 * 		capacity: number,
+	 * 		index: number,
+	 * 		points: Float64Array,
+	 * }} Interpolation
+	 */
+
+	/** @type {Interpolation?} */
+	let interpolation = null;
+
+	ig.BackgroundMap.inject({
+		/**
+		 * @this {{
+		 * 		pl_previousX?: number,
+		 * 		pl_previousY?: number,
+		 * 		scroll: {x: number, y: number}
+		 * 		parent: () => void,
+		 * }}
+		 */
+		draw:
+			function drawMap() {
+				const scrollX = this.scroll.x + ig.game.O598.originX;
+				const scrollY = this.scroll.y + ig.game.O598.originY;
+				const previousX = this.pl_previousX ?? scrollX;
+				const previousY = this.pl_previousY ?? scrollY;
+				const savedDeltaX = deltaX;
+				const savedDeltaY = deltaY;
+				deltaX = (previousX - scrollX) * xScaleCanvas * ig.system.scale;
+				deltaY = (previousY - scrollY) * yScaleCanvas * ig.system.scale;
+				this.parent();
+				this.pl_previousX = scrollX;
+				this.pl_previousY = scrollY;
+				deltaX = savedDeltaX;
+				deltaY = savedDeltaY;
+			}
+	});
+
+	const excludeDraw = new Set([window.MLand.prototype, window.Item.prototype]);
+
+	for (const key in window) {
+		const value = /** @type {any} */(window)[key];
+		if (!(value instanceof Object)) { continue; }
+		const prototype = value.prototype;
+		if (!(prototype instanceof Object) || excludeDraw.has(prototype)) { continue; }
+		const draw = prototype.draw;
+		if (typeof draw !== "function") { continue; }
+		/**
+		 * @this {HasInterpolation}
+		 */
+		prototype.draw = function () {
+			let myInterpolation = this.pl_interpolation;
+			if (!myInterpolation) {
+				myInterpolation = this.pl_interpolation = {
+					lastTick: 0,
+					capacity: 0,
+					index: 0,
+					points: new Float64Array(2)
+				};
+			}
+			if (myInterpolation.lastTick < tickCount) {
+				myInterpolation.index = 0;
+				if (myInterpolation.lastTick < tickCount - 1) {
+					myInterpolation.capacity = 0;
+				}
+			}
+			const savedInterpolation = interpolation;
+			interpolation = myInterpolation;
+			draw.apply(this, arguments);
+			interpolation.lastTick = tickCount;
+			interpolation = savedInterpolation;
+		}
+	}
+
+	// Inject into draw logic
+	MLand.inject({
+		draw: function () {
+			xScaleCanvas = scaleFactor / canvas.width;
+			yScaleCanvas = -scaleFactor / canvas.height;
+			xOffset = canvas.width * -0.5;
+			yOffset = canvas.height * -0.5;
+			const screenX = ig.game.screen.x;
+			const screenY = ig.game.screen.y;
+			deltaX = (previousScreenX - screenX) * xScaleCanvas * ig.system.scale;
+			deltaY = (previousScreenY - screenY) * yScaleCanvas * ig.system.scale;
+			previousScreenX = screenX;
+			previousScreenY = screenY;
+			this.parent();
+		}
+	});
 }));

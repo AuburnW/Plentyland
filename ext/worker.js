@@ -233,7 +233,6 @@
 					")"
 				)
 			}
-			console.log(`Loaded a ${width}x${height} image at (${x}, ${y})`);
 			gl.texSubImage2D(
 				gl.TEXTURE_2D, // Target
 				0, // Mipmap level
@@ -252,11 +251,10 @@
 		const data = message.data;
 		workerCommands[data.shift()](...data);
 	});
-
 	function render() {
 		let interpolation = Math.min(
 			(Date.now() - drawInterpolationStart) * drawInterpolationFactor,
-			1.25
+			5
 		);
 		gl.uniform1f(interpolationUniform, interpolation);
 		gl.drawArrays(gl.TRIANGLES, 0, drawLength);
