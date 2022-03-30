@@ -11,6 +11,9 @@
 		return value;
 	}
 
+	/** @type {[bitmap: ArrayBuffer, width: number, height: number, x: number, y: number][]} */
+	const loadTextures = [];
+
 	/**
 	 * @template {keyof ClientCommands} T
 	 * @param {T} command 
@@ -217,6 +220,21 @@
 			// Send geometry buffer back to client
 			sendClientCommand("returnBuffer", [geometry], geometry);
 			gl.viewport(0, 0, canvas.width, canvas.height);
+
+			for (const [bitmap, width, height, x, y] of loadTextures) {
+				gl.texSubImage2D(
+					gl.TEXTURE_2D, // Target
+					0, // Mipmap level
+					x, // xoffset
+					y, // yoffset
+					width, // width
+					height, // height
+					gl.RGBA, // format
+					gl.UNSIGNED_BYTE, // type
+					new Uint8Array(bitmap) // pixels
+				);
+			}
+			loadTextures.length = 0;
 		},
 		uploadToAtlas: (bitmap, width, height, x, y) => {
 			if (bitmap.byteLength !== width * height * 4) {
@@ -230,17 +248,7 @@
 					")"
 				)
 			}
-			gl.texSubImage2D(
-				gl.TEXTURE_2D, // Target
-				0, // Mipmap level
-				x, // xoffset
-				y, // yoffset
-				width, // width
-				height, // height
-				gl.RGBA, // format
-				gl.UNSIGNED_BYTE, // type
-				new Uint8Array(bitmap) // pixels
-			);
+			loadTextures.push([bitmap, width, height, x, y]);
 		}
 	};
 

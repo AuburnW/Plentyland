@@ -322,26 +322,11 @@ ig.module("plugins.plentyland.graphics").requires(
 				if (allocation === undefined) {
 					allocation = {
 						allocated: false,
+						lastDrawn: 0,
 						x: 0,
 						y: 0
 					};
 					allocationMap.set(allocationHash, allocation);
-				}
-				if (!allocation.allocated) {
-					const context = canvas.getContext("2d");
-					if (!context) { throw new Error("Unable to create context") }
-					const pixels = context.getImageData(sourceX, sourceY, sourceWidth, sourceHeight);
-					allocateAtlas(allocation, pixels.width, pixels.height);
-					consoleref.log(`Loaded a ${pixels.width}x${pixels.height} image at (${allocation.x}, ${allocation.y})`);
-					sendWorkerCommand(
-						"uploadToAtlas",
-						[pixels.data.buffer],
-						pixels.data.buffer,
-						pixels.width,
-						pixels.height,
-						allocation.x,
-						allocation.y
-					);
 				}
 				const x1 = (xOffset + dx) * xScaleCanvas;
 				const y1 = (yOffset + dy) * yScaleCanvas;
@@ -372,6 +357,31 @@ ig.module("plugins.plentyland.graphics").requires(
 					interpolation.points[interpolation.index++] = x1;
 					interpolation.points[interpolation.index++] = y1;
 				}
+				if (!allocation.allocated) {
+					if (allocation.lastDrawn >= tickCount) {
+						return;
+					}
+					const context = canvas.getContext("2d");
+					if (!context) { throw new Error("Unable to create context") }
+					const pixels = context.getImageData(sourceX, sourceY, sourceWidth, sourceHeight);
+					if (!allocateAtlas(allocation, pixels.width, pixels.height)) {
+						consoleref.log("Unable to allocate image");
+						// "Sleep" this allocation to prevent thrashing the allocation function with retries.
+						allocation.lastDrawn = tickCount + Math.ceil(Math.random() * updatesPerSecond);
+						return;
+					}
+					consoleref.log(`Loaded a ${pixels.width}x${pixels.height} image at (${allocation.x}, ${allocation.y})`);
+					sendWorkerCommand(
+						"uploadToAtlas",
+						[pixels.data.buffer],
+						pixels.data.buffer,
+						pixels.width,
+						pixels.height,
+						allocation.x,
+						allocation.y
+					);
+				}
+				allocation.lastDrawn = tickCount;
 				drawRectangle(
 					x1 - imageDeltaX,
 					y1 - imageDeltaY,
@@ -522,6 +532,25 @@ ig.module("plugins.plentyland.graphics").requires(
 		clip(fillRuleOrPath, fillRule) {
 			logDraw({ clip: [fillRuleOrPath, fillRule] });
 		}
+
+		/**
+		 * 
+		 * @param {number} x 
+		 * @param {number} y 
+		 * @param {number} width 
+		 * @param {number} height 
+		 */
+		strokeRect(x, y, width, height) {
+			logDraw({ strokeRect: [x, y, width, height] });
+		}
+
+		/**
+		 * 
+		 * @param {Path2D=} path 
+		 */
+		stroke(path) {
+			logDraw({ stroke: path });
+		}
 	}
 	class PlentyGradient {
 		/**
@@ -567,6 +596,7 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * 		node: AtlasNode,
 	 * 		index: number,
 	 * 		level: number,
+	 * 		age: number,
 	 * 		x: number,
 	 * 		y: number,
 	 * }} AtlasStackEntry
@@ -576,64 +606,122 @@ ig.module("plugins.plentyland.graphics").requires(
 
 	/**
 	 * 
+	 * @param {AtlasChild|undefined} child 
+	 */
+	function deallocateAtlas(child) {
+		if (child) {
+			if (child instanceof Array) {
+				for (const childChild of child) {
+					deallocateAtlas(childChild);
+				}
+			} else {
+				child.allocated = false;
+				atlasCount--;
+				consoleref.log("Deallocated at " + child.x + ", " + child.y + " last drawn " + (tickCount - child.lastDrawn) + " atlas count " + atlasCount);
+			}
+		}
+	}
+
+	let atlasCount = 0;
+
+	/**
+	 * Reserves a position in the texture atlas that can accomodate the given width and height.
+	 * If there is no available space, the least recently drawn allocations are deallocated to
+	 * make space for the given allocation.
 	 * @param {AtlasAllocation} allocation 
 	 * @param {number} width
 	 * @param {number} height
 	 */
 	function allocateAtlas(allocation, width, height) {
 		const targetLevel = Math.ceil(Math.log2(Math.max(width, height))) | 0;
-		/** @type {AtlasStackEntry[]} */
-		const stack = [{
-			node: baseNode,
-			index: 0,
-			level: textureSizeMagnitude - 1,
-			x: 0,
-			y: 0
-		}];
-		while (true) {
-			const entry = stack.pop();
-			if (!entry) { break; }
-			const { node, index, level, x, y } = entry;
-			const subNode = node[index];
-			const newX = x + ((index & 1) << level);
-			const newY = y + ((index >> 1) << level);
-			/** @type {AtlasNode?} */
-			let newNode = null;
-			if (subNode) {
-				if (subNode instanceof Array && level > targetLevel) {
-					newNode = subNode;
-				}
-			} else {
-				if (level <= targetLevel) {
-					allocation.x = newX;
-					allocation.y = newY;
-					node[index] = allocation;
-					break;
+		if (1 << targetLevel < width || 1 << targetLevel < height) {
+			throw new Error("Wrong target level " + targetLevel + "for " + width + "x" + height);
+		}
+		/** @type {AtlasNode?} */
+		let candidateNode = null;
+		let candidateIndex = 0;
+		let candidateLevel = 0;
+		let candidateX = 0;
+		let candidateY = 0;
+		let candidateAge = Number.MAX_SAFE_INTEGER;
+		/**
+		 * 
+		 * @param {AtlasNode} node 
+		 * @param {number} level 
+		 * @param {number} x 
+		 * @param {number} y 
+		 * @returns {number}
+		 */
+		function traverseNode(node, level, x, y) {
+			let age = 0;
+			for (let index = 0; index < node.length; index++) {
+				const subNode = node[index];
+				/** @type {number} */
+				let subAge;
+				const newX = x + ((index & 1) << level);
+				const newY = y + ((index >> 1) << level);
+				if (subNode) {
+					if (subNode instanceof Array) {
+						subAge = traverseNode(subNode, level - 1, newX, newY);
+					} else {
+						subAge = subNode.lastDrawn;
+					}
 				} else {
-					newNode = [null, null, null, null];
-					node[index] = newNode;
+					subAge = 0;
+					if (level > targetLevel) {
+						/** @type {AtlasNode} */
+						const newNode = [null, null, null, null];
+						node[index] = newNode;
+						subAge = traverseNode(newNode, level - 1, newX, newY);
+						if (subAge !== 0) {
+							throw new Error("Unreachable");
+						}
+						return subAge;
+					}
 				}
+				if (level >= targetLevel && subAge < candidateAge) {
+					candidateX = newX;
+					candidateY = newY;
+					candidateAge = subAge;
+					candidateLevel = level;
+					candidateNode = node;
+					candidateIndex = index;
+					if (subAge === 0) {
+						return subAge;
+					}
+				}
+				age = Math.max(age, subAge);
 			}
-			if (newNode) {
-				stack.push({
-					node: newNode,
-					index: 0,
-					level: level - 1,
-					x: newX,
-					y: newY
-				});
-			}
-			entry.index++;
-			if (entry.index < 4) {
-				stack.push(entry);
+			return age;
+		}
+		traverseNode(baseNode, textureSizeMagnitude - 1, 0, 0);
+		if (candidateNode && candidateLevel !== targetLevel) {
+			deallocateAtlas(candidateNode[candidateIndex]);
+			/** @type {AtlasNode} */(candidateNode)[candidateIndex] = null;
+			candidateNode = null;
+			candidateAge = Number.MAX_SAFE_INTEGER;
+			traverseNode(baseNode, textureSizeMagnitude - 1, 0, 0);
+			if (candidateNode === null) {
+				throw new Error("Unreachable");
 			}
 		}
-		allocation.allocated = true;
+		if (candidateNode && candidateAge !== tickCount) {
+			allocation.x = candidateX;
+			allocation.y = candidateY;
+			allocation.allocated = true;
+			deallocateAtlas(candidateNode[candidateIndex]);
+			/** @type {AtlasNode} */(candidateNode)[candidateIndex] = allocation;
+			atlasCount++;
+			return true;
+		} else {
+			return false;
+		}
 	}
 
 	/**
 	 * @typedef {{
 	 *      allocated: boolean,
+	 * 		lastDrawn: number,
 	 *      x: number,
 	 *      y: number,
 	 * }} AtlasAllocation
