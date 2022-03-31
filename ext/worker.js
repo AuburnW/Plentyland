@@ -61,8 +61,12 @@
 				"attribute vec2 b;" +
 				// Vertex texture coordinate
 				"attribute vec2 c;" +
+				// Vertex color
+				"attribute lowp vec4 g;" +
 				// Output texture coordinate
 				"varying vec2 d;" +
+				// Output vertex color
+				"varying lowp vec4 h;" +
 				// Interpolation input
 				"uniform float e;" +
 				// Vertex shader
@@ -73,6 +77,8 @@
 				"gl_Position=vec4(f.xy,0.0,1.0);" +
 				// Convert texture coordinates to texture space.
 				"d=c*" + (1 / textureSize) + ";" +
+				// Pass through vertex color
+				"h=g;" +
 				"}"
 			);
 			gl.compileShader(vertexShader);
@@ -83,12 +89,14 @@
 				"precision mediump float;" +
 				// Texture coordinate
 				"varying vec2 d;" +
+				// Vertex color
+				"varying lowp vec4 h;" +
+				// Texture
 				"uniform sampler2D f;" +
+				// Fragment shader
 				"void main(){" +
-				// Get color from texture
-				"gl_FragColor=texture2D(f,d);" +
-				// Alpha culling
-				"if(gl_FragColor.a==0.0){discard;}" +
+				// Get color from texture and multiply by vertex color
+				"gl_FragColor=texture2D(f,d)*h;" +
 				"}"
 			);
 			gl.compileShader(fragmentShader);
@@ -145,6 +153,12 @@
 			const vertexBuffer = gl.createBuffer();
 			gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
 
+			const vertexPositionIndex = 0;
+			const vertexDeltaPositionIndex = vertexPositionIndex + 8;
+			const vertexTextureCoordinatesIndex = vertexDeltaPositionIndex + 8;
+			const vertexColorIndex = vertexTextureCoordinatesIndex + 4;
+			const stride = vertexColorIndex + 4;
+
 			const vertexPosition = gl.getAttribLocation(shaderProgram, "a");
 			gl.vertexAttribPointer(
 				// Vertex position
@@ -156,9 +170,9 @@
 				// Normalize
 				false,
 				// Stride
-				20,
+				stride,
 				// Offset
-				0
+				vertexPositionIndex
 			);
 			gl.enableVertexAttribArray(vertexPosition);
 
@@ -173,9 +187,9 @@
 				// Normalize
 				false,
 				// Stride
-				20,
+				stride,
 				// Offset
-				8
+				vertexDeltaPositionIndex
 			);
 			gl.enableVertexAttribArray(vertexDeltaPosition);
 
@@ -189,14 +203,33 @@
 				// Normalize
 				false,
 				// Stride
-				20,
+				stride,
 				// Offset
-				16
+				vertexTextureCoordinatesIndex
 			);
 			gl.enableVertexAttribArray(textureCoordinates);
+
+			const vertexColor = gl.getAttribLocation(shaderProgram, "g");
+			gl.vertexAttribPointer(
+				vertexColor,
+				// Number of components
+				4,
+				// Type
+				gl.UNSIGNED_BYTE,
+				// Normalize
+				true,
+				// Stride
+				stride,
+				// Offset
+				vertexColorIndex
+			);
+			gl.enableVertexAttribArray(vertexColor);
+
 			gl.useProgram(shaderProgram);
 			interpolationUniform = unwrap(gl.getUniformLocation(shaderProgram, "e"));
 			gl.uniform1f(interpolationUniform, 0);
+			gl.enable(gl.BLEND);
+			gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 			requestAnimationFrame(render);
 		},
 		loadGeometry: (

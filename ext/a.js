@@ -236,7 +236,7 @@ ig.module("plugins.plentyland.graphics").requires(
 	"plugins.plentyland"
 ).defines(() => fetch(String(new URL("worker.js", plentyland.root))).then(r => r.blob()).then(v => {
 
-	// This how often the game is drawn. WebGL interpolates between draws.
+	// This how often the game is updated and drawn. WebGL interpolates between draws.
 	const updatesPerSecond = 20;
 
 	// Cancel main game loop (we will be implementing our own)
@@ -279,6 +279,12 @@ ig.module("plugins.plentyland.graphics").requires(
 		}
 	}
 
+	class PlentyContextState {
+		computedColor = new Uint8Array(4).fill(255);
+		color = new Uint8Array(4).fill(255);
+		globalAlpha = 1;
+	}
+
 	/**
 	 * @typedef {{
 	 * 		pl_allocation?: Map<number,AtlasAllocation>,
@@ -289,114 +295,115 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * An implementation of `CanvasRenderingContext2D` that forwards calls to WebGL in a worker
 	 */
 	class PlentyContext {
+		/** @type {PlentyContextState[]} */
+		stateStack = [new PlentyContextState()];
+		stateIndex = 0;
+		/** @type {PlentyContextState} */
+		state = /** @type {any} */(this.stateStack[0]);
+
 		/**
 		 * 
-		 * @param {CanvasImageSource} image 
-		 * @param {number} dxOrSx 
-		 * @param {number} dyOrSy 
-		 * @param {number | undefined} dwOrSw 
-		 * @param {number} dhOrSh 
-		 * @param {number | undefined} dx 
+		 * @param {PlentyCanvas} image 
+		 * @param {number} sx 
+		 * @param {number} sy 
+		 * @param {number} sw 
+		 * @param {number} sh 
+		 * @param {number} dx 
 		 * @param {number} dy 
 		 * @param {number} dw 
 		 * @param {number} dh 
 		 */
-		drawImage(image, dxOrSx, dyOrSy, dwOrSw, dhOrSh, dx, dy, dw, dh) {
-			if (image instanceof HTMLCanvasElement && dwOrSw !== undefined && dx !== undefined) {
-				/** @type {PlentyCanvas} */
-				const canvas = image;
-				let allocationMap = canvas.pl_allocation;
-				const sourceX = Math.max(Math.floor(dxOrSx), 0);
-				const sourceY = Math.max(Math.floor(dyOrSy), 0);
-				const sourceWidth = Math.min(Math.ceil(dwOrSw), image.width);
-				const sourceHeight = Math.min(Math.ceil(dhOrSh), image.height);
+		drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh) {
+			let allocationMap = image.pl_allocation;
+			const sourceX = Math.max(Math.floor(sx), 0);
+			const sourceY = Math.max(Math.floor(sy), 0);
+			const sourceWidth = Math.min(Math.ceil(sw), image.width);
+			const sourceHeight = Math.min(Math.ceil(sh), image.height);
 
-				if (allocationMap === undefined) {
-					allocationMap = canvas.pl_allocation = new Map();
-				}
-				const hashRange = 1 << 12;
-				const allocationHash = (
-					(sourceX * hashRange + sourceY) * hashRange + sourceWidth
-				) * hashRange + sourceHeight;
-				let allocation = allocationMap.get(allocationHash);
-				if (allocation === undefined) {
-					allocation = {
-						allocated: false,
-						lastDrawn: 0,
-						x: 0,
-						y: 0
-					};
-					allocationMap.set(allocationHash, allocation);
-				}
-				const x1 = (xOffset + dx) * xScaleCanvas;
-				const y1 = (yOffset + dy) * yScaleCanvas;
-				const x2 = x1 + (dw * xScaleCanvas);
-				const y2 = y1 + (dh * yScaleCanvas);
-				const u1 = allocation.x + dxOrSx - sourceX;
-				const v1 = allocation.y + dyOrSy - sourceY;
-				const u2 = u1 + dwOrSw;
-				const v2 = v1 + dhOrSh;
-				let imageDeltaX = deltaX;
-				let imageDeltaY = deltaY;
-				if (interpolation !== null) {
-					if (interpolation.capacity - 2 <= interpolation.index) {
-						interpolation.capacity += 2;
-						if (interpolation.capacity > interpolation.points.length) {
-							const newPoints = new Float64Array(interpolation.capacity * 2);
-							newPoints.set(interpolation.points);
-							interpolation.points = newPoints;
-						}
-					} else {
-						imageDeltaX = x1 - /** @type {number} */(
-							interpolation.points[interpolation.index]
-						);
-						imageDeltaY = y1 - /** @type {number} */(
-							interpolation.points[interpolation.index + 1]
-						);
+			if (allocationMap === undefined) {
+				allocationMap = image.pl_allocation = new Map();
+			}
+			const hashRange = 1 << 12;
+			const allocationHash = (
+				(sourceX * hashRange + sourceY) * hashRange + sourceWidth
+			) * hashRange + sourceHeight;
+			let allocation = allocationMap.get(allocationHash);
+			if (allocation === undefined) {
+				allocation = {
+					allocated: false,
+					lastDrawn: 0,
+					x: 0,
+					y: 0
+				};
+				allocationMap.set(allocationHash, allocation);
+			}
+			const x1 = (xOffset + dx) * xScaleCanvas;
+			const y1 = (yOffset + dy) * yScaleCanvas;
+			const x2 = x1 + (dw * xScaleCanvas);
+			const y2 = y1 + (dh * yScaleCanvas);
+			const u1 = allocation.x + sx - sourceX;
+			const v1 = allocation.y + sy - sourceY;
+			const u2 = u1 + sw;
+			const v2 = v1 + sh;
+			let imageDeltaX = deltaX;
+			let imageDeltaY = deltaY;
+			if (interpolation !== null) {
+				if (interpolation.capacity - 2 <= interpolation.index) {
+					interpolation.capacity += 2;
+					if (interpolation.capacity > interpolation.points.length) {
+						const newPoints = new Float64Array(interpolation.capacity * 2);
+						newPoints.set(interpolation.points);
+						interpolation.points = newPoints;
 					}
-					interpolation.points[interpolation.index++] = x1;
-					interpolation.points[interpolation.index++] = y1;
-				}
-				if (!allocation.allocated) {
-					if (allocation.lastDrawn >= tickCount) {
-						return;
-					}
-					const context = canvas.getContext("2d");
-					if (!context) { throw new Error("Unable to create context") }
-					const pixels = context.getImageData(sourceX, sourceY, sourceWidth, sourceHeight);
-					if (!allocateAtlas(allocation, pixels.width, pixels.height)) {
-						consoleref.log("Unable to allocate image");
-						// "Sleep" this allocation to prevent thrashing the allocation function with retries.
-						allocation.lastDrawn = tickCount + Math.ceil(Math.random() * updatesPerSecond);
-						return;
-					}
-					consoleref.log(`Loaded a ${pixels.width}x${pixels.height} image at (${allocation.x}, ${allocation.y})`);
-					sendWorkerCommand(
-						"uploadToAtlas",
-						[pixels.data.buffer],
-						pixels.data.buffer,
-						pixels.width,
-						pixels.height,
-						allocation.x,
-						allocation.y
+				} else {
+					imageDeltaX = x1 - /** @type {number} */(
+						interpolation.points[interpolation.index]
+					);
+					imageDeltaY = y1 - /** @type {number} */(
+						interpolation.points[interpolation.index + 1]
 					);
 				}
-				allocation.lastDrawn = tickCount;
-				drawRectangle(
-					x1 - imageDeltaX,
-					y1 - imageDeltaY,
-					x2 - imageDeltaX,
-					y2 - imageDeltaY,
-					imageDeltaX,
-					imageDeltaY,
-					u1,
-					v2,
-					u2,
-					v1
-				);
-			} else {
-				throw new Error("Can't draw an image in that way.");
+				interpolation.points[interpolation.index++] = x1;
+				interpolation.points[interpolation.index++] = y1;
 			}
+			if (!allocation.allocated) {
+				if (allocation.lastDrawn >= tickCount) {
+					return;
+				}
+				const context = image.getContext("2d");
+				if (!context) { throw new Error("Unable to create context") }
+				const pixels = context.getImageData(sourceX, sourceY, sourceWidth, sourceHeight);
+				if (!allocateAtlas(allocation, pixels.width, pixels.height)) {
+					consoleref.log("Unable to allocate image");
+					// "Sleep" this allocation to prevent thrashing the allocation function with retries.
+					allocation.lastDrawn = tickCount + Math.ceil(Math.random() * updatesPerSecond);
+					return;
+				}
+				consoleref.log(`Loaded a ${pixels.width}x${pixels.height} image at (${allocation.x}, ${allocation.y})`);
+				sendWorkerCommand(
+					"uploadToAtlas",
+					[pixels.data.buffer],
+					pixels.data.buffer,
+					pixels.width,
+					pixels.height,
+					allocation.x,
+					allocation.y
+				);
+			}
+			allocation.lastDrawn = tickCount;
+			drawRectangle(
+				x1 - imageDeltaX,
+				y1 - imageDeltaY,
+				x2 - imageDeltaX,
+				y2 - imageDeltaY,
+				imageDeltaX,
+				imageDeltaY,
+				u1,
+				v2,
+				u2,
+				v1,
+				this.state.computedColor
+			);
 		}
 		/**
 		 * 
@@ -410,11 +417,25 @@ ig.module("plugins.plentyland.graphics").requires(
 		}
 
 		save() {
-			logDraw("Saved canvas");
+			this.stateIndex++;
+			let state = this.stateStack[this.stateIndex];
+			if (state === undefined) {
+				state = new PlentyContextState();
+				this.stateStack[this.stateIndex] = state;
+			}
+			state.color.set(this.state.color);
+			state.computedColor.set(this.state.computedColor);
+			state.globalAlpha = this.state.globalAlpha;
 		}
 
 		restore() {
-			logDraw("Restored canvas");
+			this.stateIndex--;
+			const state = this.stateStack[this.stateIndex];
+			if (state === undefined) {
+				this.stateIndex = 0;
+			} else {
+				this.state = state;
+			}
 		}
 
 		/**
@@ -551,6 +572,16 @@ ig.module("plugins.plentyland.graphics").requires(
 		stroke(path) {
 			logDraw({ stroke: path });
 		}
+
+		get globalAlpha() { return this.state.globalAlpha }
+		set globalAlpha(value) {
+			if (value >= 0 && value <= 1) {
+				this.state.globalAlpha = value;
+				this.state.computedColor.set(this.state.color);
+				this.state.computedColor[3] =
+					/** @type {any} */(this.state.computedColor[3]) * value;
+			}
+		}
 	}
 	class PlentyGradient {
 		/**
@@ -631,6 +662,7 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * @param {AtlasAllocation} allocation 
 	 * @param {number} width
 	 * @param {number} height
+	 * @returns {boolean}
 	 */
 	function allocateAtlas(allocation, width, height) {
 		const targetLevel = Math.ceil(Math.log2(Math.max(width, height))) | 0;
@@ -751,33 +783,20 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * @param {number} v1 
 	 * @param {number} u2 
 	 * @param {number} v2 
+	 * @param {Uint8Array} color
 	 */
-	function drawRectangle(x1, y1, x2, y2, deltaX, deltaY, u1, v1, u2, v2) {
+	function drawRectangle(x1, y1, x2, y2, deltaX, deltaY, u1, v1, u2, v2, color) {
 		if (geometryBuffer.buffer.byteLength === 0) { return; }
 
 		// Triangle 1
-		drawVertex(x1, y1, deltaX, deltaY, u1, v2);
-		drawVertex(x1, y2, deltaX, deltaY, u1, v1);
-		drawVertex(x2, y1, deltaX, deltaY, u2, v2);
+		drawVertex(x1, y1, deltaX, deltaY, u1, v2, color);
+		drawVertex(x1, y2, deltaX, deltaY, u1, v1, color);
+		drawVertex(x2, y1, deltaX, deltaY, u2, v2, color);
 
 		// Triangle 2
-		drawVertex(x1, y2, deltaX, deltaY, u1, v1);
-		drawVertex(x2, y2, deltaX, deltaY, u2, v1);
-		drawVertex(x2, y1, deltaX, deltaY, u2, v2);
-
-		vertexCount += 6;
-	}
-
-	function drawQuad(x1, y1, dx1, dy1, u1, v1, x2, y2, dx2, dy2, u2, v2, x3, y3, dx3, dy3, u3, v3, x4, y4, dx4, dy4, u4, v4) {
-		// Triangle 1
-		drawVertex(x1, y1, dx1, deltaY, u1, v2);
-		drawVertex(x1, y2, deltaX, deltaY, u1, v1);
-		drawVertex(x2, y1, deltaX, deltaY, u2, v2);
-
-		// Triangle 2
-		drawVertex(x1, y2, deltaX, deltaY, u1, v1);
-		drawVertex(x2, y2, deltaX, deltaY, u2, v1);
-		drawVertex(x2, y1, deltaX, deltaY, u2, v2);
+		drawVertex(x1, y2, deltaX, deltaY, u1, v1, color);
+		drawVertex(x2, y2, deltaX, deltaY, u2, v1, color);
+		drawVertex(x2, y1, deltaX, deltaY, u2, v2, color);
 
 		vertexCount += 6;
 	}
@@ -807,7 +826,7 @@ ig.module("plugins.plentyland.graphics").requires(
 	// Geometry parameters
 
 	const maxQuads = 2048;
-	const vertexSize = 20;
+	const vertexSize = 24;
 	const triangleSize = 3 * vertexSize;
 	const quadSize = 2 * triangleSize;
 	const bufferSize = maxQuads * quadSize;
@@ -835,8 +854,9 @@ ig.module("plugins.plentyland.graphics").requires(
 	 * @param {number} deltaY 
 	 * @param {number} u 
 	 * @param {number} v 
+	 * @param {Uint8Array} color
 	 */
-	function drawVertex(x, y, deltaX, deltaY, u, v) {
+	function drawVertex(x, y, deltaX, deltaY, u, v, color) {
 		geometryBuffer.setFloat32(geometryIndex, x, littleEndian);
 		geometryIndex += 4;
 
@@ -854,6 +874,11 @@ ig.module("plugins.plentyland.graphics").requires(
 
 		geometryBuffer.setInt16(geometryIndex, v, littleEndian);
 		geometryIndex += 2;
+
+		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[0]));
+		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[1]));
+		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[2]));
+		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[3]));
 	}
 
 	const msPerTick = 1000 / updatesPerSecond;
