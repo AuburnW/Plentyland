@@ -454,10 +454,6 @@ ig.module("plugins.plentyland.graphics").requires(
 			}
 			const dx2 = dx + dw;
 			const dy2 = dy + dh;
-			const u1 = allocation.x + sx - sourceX;
-			const v1 = allocation.y + sy - sourceY;
-			const u2 = u1 + sw;
-			const v2 = v1 + sh;
 			let x1;
 			let y1;
 			let x2;
@@ -523,6 +519,10 @@ ig.module("plugins.plentyland.graphics").requires(
 					allocation.y
 				);
 			}
+			const u1 = allocation.x + sx - sourceX;
+			const v1 = allocation.y + sy - sourceY;
+			const u2 = u1 + sw;
+			const v2 = v1 + sh;
 			allocation.lastDrawn = tickCount;
 			drawRectangle(
 				x1 - imageDeltaX,
