@@ -245,7 +245,6 @@ ig.module("plugins.plentyland.graphics").requires(
 	const workerURL = URL.createObjectURL(v);
 	const worker = new Worker(workerURL);
 
-
 	// Inject our own canvas implementation
 	/** @type {HTMLCanvasElement?} */
 	let oldCanvas = null;
@@ -262,15 +261,7 @@ ig.module("plugins.plentyland.graphics").requires(
 
 	/** @type {HTMLCanvasElement} */
 	const offscreenCanvas = /** @type {any} */(canvas).transferControlToOffscreen();
-	const textureSizeMagnitude = 11;
 	const scaleFactor = 2;
-
-	sendWorkerCommand(
-		"initialize",
-		[/** @type {any} */(offscreenCanvas)],
-		offscreenCanvas,
-		textureSizeMagnitude
-	);
 
 	let drawCount = 500;
 	function logDraw(value) {
@@ -397,12 +388,6 @@ ig.module("plugins.plentyland.graphics").requires(
 	 */
 
 	/**
-	 * @typedef {{
-	 * 		pl_allocation?: Map<number,AtlasAllocation>,
-	 * } & HTMLCanvasElement} PlentyCanvas
-	 */
-
-	/**
 	 * An implementation of `CanvasRenderingContext2D` that forwards calls to WebGL in a worker
 	 */
 	class PlentyContext {
@@ -418,7 +403,7 @@ ig.module("plugins.plentyland.graphics").requires(
 
 		/**
 		 * 
-		 * @param {PlentyCanvas} image 
+		 * @param {HTMLCanvasElement} image 
 		 * @param {number} sx 
 		 * @param {number} sy 
 		 * @param {number} sw 
@@ -429,29 +414,10 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * @param {number} dh 
 		 */
 		drawImage(image, sx, sy, sw, sh, dx, dy, dw, dh) {
-			let allocationMap = image.pl_allocation;
 			const sourceX = Math.max(Math.floor(sx), 0);
 			const sourceY = Math.max(Math.floor(sy), 0);
 			const sourceWidth = Math.min(Math.ceil(sw), image.width);
 			const sourceHeight = Math.min(Math.ceil(sh), image.height);
-
-			if (allocationMap === undefined) {
-				allocationMap = image.pl_allocation = new Map();
-			}
-			const hashRange = 1 << 12;
-			const allocationHash = (
-				(sourceX * hashRange + sourceY) * hashRange + sourceWidth
-			) * hashRange + sourceHeight;
-			let allocation = allocationMap.get(allocationHash);
-			if (allocation === undefined) {
-				allocation = {
-					allocated: false,
-					lastDrawn: 0,
-					x: 0,
-					y: 0
-				};
-				allocationMap.set(allocationHash, allocation);
-			}
 			const dx2 = dx + dw;
 			const dy2 = dy + dh;
 			let x1;
@@ -495,35 +461,19 @@ ig.module("plugins.plentyland.graphics").requires(
 				interpolation.points[interpolation.index++] = x1;
 				interpolation.points[interpolation.index++] = y1;
 			}
-			if (!allocation.allocated) {
-				if (allocation.lastDrawn >= tickCount) {
-					return;
-				}
-				const context = image.getContext("2d");
-				if (!context) { throw new Error("Unable to create context") }
-				const pixels = context.getImageData(sourceX, sourceY, sourceWidth, sourceHeight);
-				if (!allocateAtlas(allocation, pixels.width, pixels.height)) {
-					consoleref.log("Unable to allocate image");
-					// "Sleep" this allocation to prevent thrashing the allocation function with retries.
-					allocation.lastDrawn = tickCount + Math.ceil(Math.random() * updatesPerSecond);
-					return;
-				}
-				consoleref.log(`Loaded a ${pixels.width}x${pixels.height} image at (${allocation.x}, ${allocation.y})`);
-				sendWorkerCommand(
-					"uploadToAtlas",
-					[pixels.data.buffer],
-					pixels.data.buffer,
-					pixels.width,
-					pixels.height,
-					allocation.x,
-					allocation.y
-				);
+			const reservation =
+				Atlas.getReservation(image, sourceX, sourceY, sourceWidth, sourceHeight);
+
+			if (!reservation.reserve(image, sourceX, sourceY, sourceWidth, sourceHeight)) {
+				// Reservation failed, so skip drawing.
+				return;
 			}
-			const u1 = allocation.x + sx - sourceX;
-			const v1 = allocation.y + sy - sourceY;
+
+			const u1 = reservation.x + sx - sourceX;
+			const v1 = reservation.y + sy - sourceY;
 			const u2 = u1 + sw;
 			const v2 = v1 + sh;
-			allocation.lastDrawn = tickCount;
+			reservation.lastDrawn = tickCount;
 			drawRectangle(
 				x1 - imageDeltaX,
 				y1 - imageDeltaY,
@@ -581,17 +531,6 @@ ig.module("plugins.plentyland.graphics").requires(
 		 */
 		scale(x, y) {
 			Transform.scale(x, y, this.state.transform);
-			// const input = this.inputMatrix;
-			// const output = this.outputMatrix;
-			// input[0] = x;
-			// input[1] = 0;
-			// input[2] = 0;
-			// input[3] = y;
-			// input[4] = 0;
-			// input[5] = 0;
-			// Transform.multiply(this.state.transform, input, output);
-			// this.outputMatrix = this.state.transform;
-			// this.state.transform = output;
 			this.state.isIdentity = false;
 		}
 
@@ -743,9 +682,6 @@ ig.module("plugins.plentyland.graphics").requires(
 		}
 	}
 
-	const context = new PlentyContext();
-	ig.system.context = context;
-
 	/** @type {ClientCommands} */
 	const clientCommands = {
 		returnBuffer: buffer => {
@@ -772,154 +708,280 @@ ig.module("plugins.plentyland.graphics").requires(
 	}
 
 	/**
-	 * @typedef {{
-	 * 		node: AtlasNode,
-	 * 		index: number,
-	 * 		level: number,
-	 * 		age: number,
-	 * 		x: number,
-	 * 		y: number,
-	 * }} AtlasStackEntry
+	 * The atlas is used to reserve space in the main texture.
 	 */
-
-	// Atlas Allocation
-
-	/**
-	 * 
-	 * @param {AtlasChild|undefined} child 
-	 */
-	function deallocateAtlas(child) {
-		if (child) {
-			if (child instanceof Array) {
-				for (const childChild of child) {
-					deallocateAtlas(childChild);
-				}
-			} else {
-				child.allocated = false;
-				atlasCount--;
-				consoleref.log("Deallocated at " + child.x + ", " + child.y + " last drawn " + (tickCount - child.lastDrawn) + " atlas count " + atlasCount);
-			}
-		}
-	}
-
-	let atlasCount = 0;
-
-	/**
-	 * Reserves a position in the texture atlas that can accomodate the given width and height.
-	 * If there is no available space, the least recently drawn allocations are deallocated to
-	 * make space for the given allocation.
-	 * @param {AtlasAllocation} allocation 
-	 * @param {number} width
-	 * @param {number} height
-	 * @returns {boolean}
-	 */
-	function allocateAtlas(allocation, width, height) {
-		const targetLevel = Math.ceil(Math.log2(Math.max(width, height))) | 0;
-		if (1 << targetLevel < width || 1 << targetLevel < height) {
-			throw new Error("Wrong target level " + targetLevel + "for " + width + "x" + height);
-		}
-		/** @type {AtlasNode?} */
-		let candidateNode = null;
-		let candidateIndex = 0;
-		let candidateLevel = 0;
-		let candidateX = 0;
-		let candidateY = 0;
-		let candidateAge = Number.MAX_SAFE_INTEGER;
+	class Atlas {
 		/**
-		 * 
-		 * @param {AtlasNode} node 
-		 * @param {number} level 
+		 * A child of an `AtlasNode` which represents a quadrant in the node.
+		 * - `AtlasNode` indicates the quadrant is subdivided into sub-quadrants as specified by
+		 * the node's children.
+		 * - `Atlas.Reservation` represents a reservation that currently occupies the quadrant.
+		 * - `null` indicates the quadrant is empty and available to be reserved.
+		 * @typedef {AtlasNode | Atlas.Reservation | null} AtlasChild
+		 */
+
+		/**
+		 * A reserved space in the atlas. Its 4 elements represent the 4 quadrants of its space.
+		 * @typedef {[AtlasChild, AtlasChild, AtlasChild, AtlasChild]} AtlasNode
+		 */
+
+		/**
+		 * Returns the specific reservation for the given subsection of the `image`.
+		 * @param {HTMLCanvasElement & {pl_reservation?: Map<number, Atlas.Reservation>}} image 
 		 * @param {number} x 
 		 * @param {number} y 
-		 * @returns {number}
+		 * @param {number} width 
+		 * @param {number} height 
 		 */
-		function traverseNode(node, level, x, y) {
-			let age = 0;
-			for (let index = 0; index < node.length; index++) {
-				const subNode = node[index];
-				/** @type {number} */
-				let subAge;
-				const newX = x + ((index & 1) << level);
-				const newY = y + ((index >> 1) << level);
-				if (subNode) {
-					if (subNode instanceof Array) {
-						subAge = traverseNode(subNode, level - 1, newX, newY);
+		static getReservation(image, x, y, width, height) {
+			let map = image.pl_reservation;
+			if (map === undefined) {
+				map = image.pl_reservation = new Map();
+			}
+			const hashRange = 1 << 12;
+			const allocationHash = (
+				(x * hashRange + y) * hashRange + width
+			) * hashRange + height;
+			let reservation = map.get(allocationHash);
+			if (reservation === undefined) {
+				reservation = new Atlas.Reservation;
+				map.set(allocationHash, reservation);
+			}
+			return reservation;
+		}
+
+		/**
+		 * Reserves a space in the atlas that can accomodate the given width and height.
+		 * If there is no available space, the least recently drawn reservations are deallocated to
+		 * make space for the given reservation.
+		 * @param {Atlas.Reservation} reservation 
+		 * @param {number} width
+		 * @param {number} height
+		 * @returns {boolean} `true` if the allocation succeded. If `false`, allocation did not
+		 * succeed and thus the space pointed to by the allocation should not be used.
+		 */
+		static allocate(reservation, width, height) {
+			const targetLevel = Math.ceil(Math.log2(Math.max(width, height))) | 0;
+			if (1 << targetLevel < width || 1 << targetLevel < height) {
+				throw new Error("Wrong target level " + targetLevel + "for " + width + "x" + height);
+			}
+
+			// These variables keep track of the current candidate node to insert the allocation
+			// into. The best candidate is an empty location. If no location is available, the best
+			// candidate is the node that was least recently drawn.
+
+			/** @type {AtlasNode?} */
+			let candidateNode = null;
+			let candidateIndex = 0;
+			let candidateLevel = 0;
+			let candidateX = 0;
+			let candidateY = 0;
+			let candidateAge = Number.MAX_SAFE_INTEGER;
+
+			/**
+			 * Recursively traverses the node, attemping to find a candidate space to allocate into.
+			 * @param {AtlasNode} node 
+			 * @param {number} level 
+			 * @param {number} x 
+			 * @param {number} y 
+			 * @returns {number} The most recent tick the node's children have been drawn.
+			 */
+			function traverseNode(node, level, x, y) {
+				let drawTime = 0;
+				for (let index = 0; index < node.length; index++) {
+					const subNode = node[index];
+					/** @type {number} */
+					let subDrawTime;
+
+					// Use bit arithmetic to convert the child index into the assocaited
+					// quadrant coordinates.
+					const newX = x + ((index & 1) << level);
+					const newY = y + ((index >> 1) << level);
+
+					if (subNode) {
+						if (subNode instanceof Array) {
+							// Node is a sub-node, so traverse it.
+							subDrawTime = traverseNode(subNode, level - 1, newX, newY);
+						} else {
+							// Node is a reservation, so record its last draw time.
+							subDrawTime = subNode.lastDrawn;
+						}
 					} else {
-						subAge = subNode.lastDrawn;
+						// Node is empty
+						subDrawTime = 0;
+						if (level > targetLevel) {
+							// The node is too big, so split it into smaller nodes.
+
+							/** @type {AtlasNode} */
+							const newNode = [null, null, null, null];
+							node[index] = newNode;
+
+							// Traverse the subdivided node to either find the first empty space,
+							// or subdivide it even more.
+							subDrawTime = traverseNode(newNode, level - 1, newX, newY);
+							if (subDrawTime !== 0) {
+								throw new Error("Newly created node has lastDrawn other than 0.");
+							}
+							return subDrawTime;
+						}
+					}
+					if (level >= targetLevel && subDrawTime < candidateAge) {
+						// This child is a compatible size and has been drawn later than the current
+						// candidate, so replace the current candidate with this node.
+						candidateX = newX;
+						candidateY = newY;
+						candidateAge = subDrawTime;
+						candidateLevel = level;
+						candidateNode = node;
+						candidateIndex = index;
+						if (subDrawTime === 0) {
+							// This child is empty, so we aren't going to find a better candidate.
+							// Return early to save computation.
+							return subDrawTime;
+						}
+					}
+					drawTime = Math.max(drawTime, subDrawTime);
+				}
+				return drawTime;
+			}
+			// Find a candidate that can fit the given size
+			traverseNode(Atlas.root, Atlas.sizeMagnitude - 1, 0, 0);
+
+			if (candidateNode && candidateLevel !== targetLevel) {
+				// The found candidate is larger than the given size
+
+				// First, we deallocate the candidate
+				Atlas.deallocate(candidateNode[candidateIndex]);
+				/** @type {AtlasNode} */(candidateNode)[candidateIndex] = null;
+
+				// Then replace the candidate with an empty node
+				candidateNode = null;
+
+				// Finally, split the candidate into nodes that best fit the given size.
+				candidateAge = Number.MAX_SAFE_INTEGER;
+				traverseNode(Atlas.root, Atlas.sizeMagnitude - 1, 0, 0);
+				if (candidateNode === null) {
+					throw new Error("No candidate found despite splitting a larger one.");
+				}
+			}
+			if (candidateNode && candidateAge !== tickCount) {
+				// A candidate was found, so set the given reservation to allocated and deallocate
+				// the candidate.
+				reservation.x = candidateX;
+				reservation.y = candidateY;
+				reservation.allocated = true;
+				Atlas.deallocate(candidateNode[candidateIndex]);
+				/** @type {AtlasNode} */(candidateNode)[candidateIndex] = reservation;
+				Atlas.count++;
+				return true;
+			} else {
+				return false;
+			}
+		}
+
+		/**
+		 * Marks the child and all of its descendants as deallocated. After deallocation, the space
+		 * it occupied may be used by other `AtlasChild`s.
+		 * @param {AtlasChild | undefined} child 
+		 */
+		static deallocate(child) {
+			if (child) {
+				if (child instanceof Array) {
+					for (const childChild of child) {
+						Atlas.deallocate(childChild);
 					}
 				} else {
-					subAge = 0;
-					if (level > targetLevel) {
-						/** @type {AtlasNode} */
-						const newNode = [null, null, null, null];
-						node[index] = newNode;
-						subAge = traverseNode(newNode, level - 1, newX, newY);
-						if (subAge !== 0) {
-							throw new Error("Unreachable");
-						}
-						return subAge;
-					}
+					child.allocated = false;
+					child.x = -1;
+					child.y = -1;
+					Atlas.count--;
+					consoleref.log(
+						"Deallocated at " +
+						child.x +
+						", " +
+						child.y +
+						" last drawn " +
+						(tickCount - child.lastDrawn) +
+						" atlas count " +
+						Atlas.count
+					);
 				}
-				if (level >= targetLevel && subAge < candidateAge) {
-					candidateX = newX;
-					candidateY = newY;
-					candidateAge = subAge;
-					candidateLevel = level;
-					candidateNode = node;
-					candidateIndex = index;
-					if (subAge === 0) {
-						return subAge;
-					}
-				}
-				age = Math.max(age, subAge);
-			}
-			return age;
-		}
-		traverseNode(baseNode, textureSizeMagnitude - 1, 0, 0);
-		if (candidateNode && candidateLevel !== targetLevel) {
-			deallocateAtlas(candidateNode[candidateIndex]);
-			/** @type {AtlasNode} */(candidateNode)[candidateIndex] = null;
-			candidateNode = null;
-			candidateAge = Number.MAX_SAFE_INTEGER;
-			traverseNode(baseNode, textureSizeMagnitude - 1, 0, 0);
-			if (candidateNode === null) {
-				throw new Error("Unreachable");
 			}
 		}
-		if (candidateNode && candidateAge !== tickCount) {
-			allocation.x = candidateX;
-			allocation.y = candidateY;
-			allocation.allocated = true;
-			deallocateAtlas(candidateNode[candidateIndex]);
-			/** @type {AtlasNode} */(candidateNode)[candidateIndex] = allocation;
-			atlasCount++;
+	}
+	/**
+	 * Represents an allocation in the atlas.
+	 */
+	Atlas.Reservation = class {
+		allocated = false;
+		lastDrawn = 0;
+		x = -1;
+		y = -1;
+
+		/**
+		 * Ensures that this reservation is in the atlas, allocating and uploading the image to the
+		 * main texture if necessary.
+		 * @param {HTMLCanvasElement} image 
+		 * @param {number} x 
+		 * @param {number} y 
+		 * @param {number} width 
+		 * @param {number} height 
+		 * @returns {boolean} `true` if the reservation succeeded and the image may be drawn.
+		 */
+		reserve(image, x, y, width, height) {
+			if (!this.allocated) {
+				if (this.lastDrawn >= tickCount) {
+					// We're in cooldown from a failed allocation.
+					return false;
+				}
+				const context = image.getContext("2d");
+				if (!context) { throw new Error("Unable to create context") }
+				if (!Atlas.allocate(this, width, height)) {
+					consoleref.warn(`Unable to allocate ${width}x${height} image`);
+					// Set this reservation on cool down to limit thrashing of the algorithm
+					this.lastDrawn = tickCount + Math.ceil(Math.random() * updatesPerSecond);
+					return false;
+				}
+				const pixels = context.getImageData(x, y, width, height);
+				consoleref.log(
+					`Loaded a ${pixels.width}x${pixels.height} image at (${this.x}, ${this.y})`
+				);
+				sendWorkerCommand(
+					"uploadToAtlas",
+					[pixels.data.buffer],
+					pixels.data.buffer,
+					pixels.width,
+					pixels.height,
+					this.x,
+					this.y
+				);
+			}
 			return true;
-		} else {
-			return false;
 		}
 	}
 
-	/**
-	 * @typedef {{
-	 *      allocated: boolean,
-	 * 		lastDrawn: number,
-	 *      x: number,
-	 *      y: number,
-	 * }} AtlasAllocation
-	 */
+	/** The number of `Allocation`s currently allocated in the atlas. */
+	Atlas.count = 0;
 
 	/**
-	 * @typedef {AtlasNode | AtlasAllocation | null} AtlasChild
+	 * The root node of the atlas, which divides the whole texture into 4 equally sized quadrants.
+	 * @type {AtlasNode}
 	 */
+	Atlas.root = [null, null, null, null];
 
 	/**
-	 * @typedef {[AtlasChild, AtlasChild, AtlasChild, AtlasChild]} AtlasNode
+	 * The exponent of the size of the texture. In other words, the x in size = 2^x
 	 */
+	Atlas.sizeMagnitude = 11;
 
-	/** @type {AtlasNode} */
-	const baseNode = [null, null, null, null];
-
-	// Draw
+	sendWorkerCommand(
+		"initialize",
+		[/** @type {any} */(offscreenCanvas)],
+		offscreenCanvas,
+		Atlas.sizeMagnitude
+	);
+	const context = new PlentyContext();
+	ig.system.context = context;
 
 	/**
 	 * @param {number} x1
