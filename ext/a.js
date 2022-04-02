@@ -1,9 +1,3 @@
-/** 
- * @typedef {{
- * 		returnBuffer: (buffer: ArrayBuffer) => void
- * }} ClientCommands
- */
-
 // Core functionality for Plentyland
 ig.module("plugins.plentyland").requires(
 	"game.main",
@@ -234,7 +228,7 @@ ig.module("plugins.plentyland.audio").requires(
 // The lower update rate causes some issues with code that assumes 60fps.
 ig.module("plugins.plentyland.graphics").requires(
 	"plugins.plentyland"
-).defines(() => fetch(String(new URL("worker.js", plentyland.root))).then(r => r.blob()).then(v => {
+).defines(() => {
 
 	// This how often the game is updated and drawn. WebGL interpolates between draws.
 	const updatesPerSecond = 20;
@@ -242,25 +236,6 @@ ig.module("plugins.plentyland.graphics").requires(
 	// Cancel main game loop (we will be implementing our own)
 	ig[plentyland.cancelLoop](ig.system[plentyland.cancelId]);
 
-	const workerURL = URL.createObjectURL(v);
-	const worker = new Worker(workerURL);
-
-	// Inject our own canvas implementation
-	/** @type {HTMLCanvasElement?} */
-	let oldCanvas = null;
-	oldCanvas = /** @type {HTMLCanvasElement} */(ig.system.canvas);
-	const canvas = document.createElement("canvas");
-	canvas.id = oldCanvas.id;
-	canvas.style.cssText = oldCanvas.style.cssText;
-	canvas.width = oldCanvas.width;
-	canvas.height = oldCanvas.height;
-	oldCanvas.parentNode?.insertBefore(canvas, oldCanvas);
-	oldCanvas.parentNode?.removeChild(oldCanvas);
-	oldCanvas = null;
-	ig.system.canvas = canvas;
-
-	/** @type {HTMLCanvasElement} */
-	const offscreenCanvas = /** @type {any} */(canvas).transferControlToOffscreen();
 	const scaleFactor = 2;
 
 	let drawCount = 500;
@@ -436,10 +411,10 @@ ig.module("plugins.plentyland.graphics").requires(
 				x2 = Transform.getX(dx2, dy2, transform);
 				y2 = Transform.getY(dx2, dy2, transform);
 			}
-			x1 = (xOffset + x1) * xScaleCanvas;
-			y1 = (yOffset + y1) * yScaleCanvas;
-			x2 = (xOffset + x2) * xScaleCanvas;
-			y2 = (yOffset + y2) * yScaleCanvas;
+			x1 = (Draw.xOffset + x1) * Draw.xToScreenX;
+			y1 = (Draw.yOffset + y1) * Draw.yToScreenY;
+			x2 = (Draw.xOffset + x2) * Draw.xToScreenX;
+			y2 = (Draw.yOffset + y2) * Draw.yToScreenY;
 			let imageDeltaX = deltaX;
 			let imageDeltaY = deltaY;
 			if (interpolation !== null) {
@@ -473,8 +448,7 @@ ig.module("plugins.plentyland.graphics").requires(
 			const v1 = reservation.y + sy - sourceY;
 			const u2 = u1 + sw;
 			const v2 = v1 + sh;
-			reservation.lastDrawn = tickCount;
-			drawRectangle(
+			Draw.rectangle(
 				x1 - imageDeltaX,
 				y1 - imageDeltaY,
 				x2 - imageDeltaX,
@@ -679,31 +653,6 @@ ig.module("plugins.plentyland.graphics").requires(
 		 */
 		addColorStop(offset, color) {
 
-		}
-	}
-
-	/** @type {ClientCommands} */
-	const clientCommands = {
-		returnBuffer: buffer => {
-			geometryBuffer = new DataView(buffer);
-		}
-	}
-	worker.onmessage = message => {
-		const data = message.data;
-		clientCommands[data.shift()](...data);
-	};
-
-	/**
-	 * @template {keyof WorkerCommands} T
-	 * @param {T} command 
-	 * @param {Transferable[] | null} transfer 
-	 * @param  {Parameters<WorkerCommands[T]>} args 
-	 */
-	function sendWorkerCommand(command, transfer, ...args) {
-		if (transfer) {
-			worker.postMessage([command, ...args], transfer);
-		} else {
-			worker.postMessage([command, ...args]);
 		}
 	}
 
@@ -946,16 +895,9 @@ ig.module("plugins.plentyland.graphics").requires(
 				consoleref.log(
 					`Loaded a ${pixels.width}x${pixels.height} image at (${this.x}, ${this.y})`
 				);
-				sendWorkerCommand(
-					"uploadToAtlas",
-					[pixels.data.buffer],
-					pixels.data.buffer,
-					pixels.width,
-					pixels.height,
-					this.x,
-					this.y
-				);
+				Draw.uploadToAtlas(pixels, this.x, this.y);
 			}
+			this.lastDrawn = tickCount;
 			return true;
 		}
 	}
@@ -974,130 +916,230 @@ ig.module("plugins.plentyland.graphics").requires(
 	 */
 	Atlas.sizeMagnitude = 11;
 
-	sendWorkerCommand(
-		"initialize",
-		[/** @type {any} */(offscreenCanvas)],
-		offscreenCanvas,
-		Atlas.sizeMagnitude
-	);
 	const context = new PlentyContext();
 	ig.system.context = context;
 
-	/**
-	 * @param {number} x1
-	 * @param {number} y1
-	 * @param {number} x2
-	 * @param {number} y2
-	 * @param {number} deltaX 
-	 * @param {number} deltaY 
-	 * @param {number} u1 
-	 * @param {number} v1 
-	 * @param {number} u2 
-	 * @param {number} v2 
-	 * @param {Uint8Array} color
-	 */
-	function drawRectangle(x1, y1, x2, y2, deltaX, deltaY, u1, v1, u2, v2, color) {
-		if (geometryBuffer.buffer.byteLength === 0) { return; }
+	class Draw {
+		static initialize() {
+			return fetch(String(new URL("worker.js", plentyland.root)))
+				.then(response => response.blob())
+				.then(blob => {
+					/** @type {ClientCommands} */
+					const clientCommands = {
+						returnBuffer: buffer => {
+							Draw.geometryBuffer = new DataView(buffer);
+						}
+					}
+					const workerURL = URL.createObjectURL(blob);
+					Draw.worker = new Worker(workerURL);
+					Draw.worker.onmessage = message => {
+						const data = message.data;
+						clientCommands[data.shift()](...data);
+					};
 
-		// Triangle 1
-		drawVertex(x1, y1, deltaX, deltaY, u1, v2, color);
-		drawVertex(x1, y2, deltaX, deltaY, u1, v1, color);
-		drawVertex(x2, y1, deltaX, deltaY, u2, v2, color);
+					// Inject our own canvas implementation
+					/** @type {HTMLCanvasElement?} */
+					let oldCanvas = null;
+					oldCanvas = /** @type {HTMLCanvasElement} */(ig.system.canvas);
+					Draw.canvas = document.createElement("canvas");
+					Draw.canvas.id = oldCanvas.id;
+					Draw.canvas.style.cssText = oldCanvas.style.cssText;
+					Draw.canvas.width = oldCanvas.width;
+					Draw.canvas.height = oldCanvas.height;
+					oldCanvas.parentNode?.insertBefore(Draw.canvas, oldCanvas);
+					oldCanvas.parentNode?.removeChild(oldCanvas);
+					oldCanvas = null;
+					ig.system.canvas = Draw.canvas;
 
-		// Triangle 2
-		drawVertex(x1, y2, deltaX, deltaY, u1, v1, color);
-		drawVertex(x2, y2, deltaX, deltaY, u2, v1, color);
-		drawVertex(x2, y1, deltaX, deltaY, u2, v2, color);
+					/** @type {HTMLCanvasElement} */
+					const offscreenCanvas = /** @type {any} */(Draw.canvas)
+						.transferControlToOffscreen();
+					Draw.send(
+						"initialize",
+						[/** @type {any} */(offscreenCanvas)],
+						offscreenCanvas,
+						Atlas.sizeMagnitude
+					);
+				});
+		}
 
-		vertexCount += 6;
-	}
+		/**
+		 * @param {number} x1
+		 * @param {number} y1
+		 * @param {number} x2
+		 * @param {number} y2
+		 * @param {number} deltaX 
+		 * @param {number} deltaY 
+		 * @param {number} u1 
+		 * @param {number} v1 
+		 * @param {number} u2 
+		 * @param {number} v2 
+		 * @param {Color.RGBA} color
+		 */
+		static rectangle(x1, y1, x2, y2, deltaX, deltaY, u1, v1, u2, v2, color) {
+			if (Draw.geometryBuffer.buffer.byteLength === 0) { return; }
 
-	/**
-	 * 
-	 * @param {number} startTime 
-	 * @param {number} factor 
-	 */
-	function sendInterpolation(startTime, factor) {
-		const buffer = geometryBuffer.buffer;
-		if (buffer.byteLength > 0) {
-			sendWorkerCommand(
-				"loadGeometry",
-				[buffer],
-				buffer,
-				Math.min(geometryIndex, geometryBuffer.byteLength),
-				vertexCount,
-				startTime,
-				factor
+			// Triangle 1
+			Draw.vertex(x1, y1, deltaX, deltaY, u1, v2, color);
+			Draw.vertex(x1, y2, deltaX, deltaY, u1, v1, color);
+			Draw.vertex(x2, y1, deltaX, deltaY, u2, v2, color);
+
+			// Triangle 2
+			Draw.vertex(x1, y2, deltaX, deltaY, u1, v1, color);
+			Draw.vertex(x2, y2, deltaX, deltaY, u2, v1, color);
+			Draw.vertex(x2, y1, deltaX, deltaY, u2, v2, color);
+
+			Draw.vertexCount += 6;
+		}
+
+		/**
+		 * Writes a vertex to the vertex buffer.
+		 * @private
+		 * @param {number} x 
+		 * @param {number} y 
+		 * @param {number} deltaX 
+		 * @param {number} deltaY 
+		 * @param {number} u 
+		 * @param {number} v 
+		 * @param {Color.RGBA} color
+		 */
+		static vertex(x, y, deltaX, deltaY, u, v, color) {
+			let index = Draw.geometryIndex;
+			const endian = Draw.isLittleEndian;
+			const buffer = Draw.geometryBuffer;
+			buffer.setFloat32(index, x, endian); index += 4;
+			buffer.setFloat32(index, y, endian); index += 4;
+			buffer.setFloat32(index, deltaX, endian); index += 4;
+			buffer.setFloat32(index, deltaY, endian); index += 4;
+			buffer.setInt16(index, u, endian); index += 2;
+			buffer.setInt16(index, v, endian); index += 2;
+			buffer.setUint8(index++, color[0]);
+			buffer.setUint8(index++, color[1]);
+			buffer.setUint8(index++, color[2]);
+			buffer.setUint8(index++, color[3]);
+			Draw.geometryIndex = index;
+		}
+
+		/**
+		 * Finalizes geometry and sends it and interpolation data to WebGL.
+		 * @param {number} startTime The interpolation start time for this batch of geometry.
+		 * @param {number} millisecondsToInterpolation A factor that converts milliseconds after the
+		 * start time into an interpolation value from 0 to 1, where 0 represents the start and 1
+		 * represents the destination. Values outside of this range are valid and represent
+		 * extrapolation from the start or destination.
+		 */
+		static finalize(startTime, millisecondsToInterpolation) {
+			const buffer = Draw.geometryBuffer.buffer;
+			if (buffer.byteLength > 0) {
+				Draw.send(
+					"loadGeometry",
+					[buffer],
+					buffer,
+					Math.min(Draw.geometryIndex, Draw.geometryBuffer.byteLength),
+					Draw.vertexCount,
+					startTime,
+					millisecondsToInterpolation
+				);
+			}
+			Draw.geometryIndex = 0;
+			Draw.vertexCount = 0;
+		}
+
+		/**
+		 * @private
+		 * @template {keyof WorkerCommands} T
+		 * @param {T} command 
+		 * @param {Transferable[] | null} transfer 
+		 * @param {Parameters<WorkerCommands[T]>} args 
+		 */
+		static send(command, transfer, ...args) {
+			if (Draw.worker) {
+				if (transfer) {
+					Draw.worker.postMessage([command, ...args], transfer);
+				} else {
+					Draw.worker.postMessage([command, ...args]);
+				}
+			} else {
+				throw new Error("Worker not yet initialized");
+			}
+		}
+
+		/**
+		 * Uploads pixel data to the texture at the given coordinates. The backing buffer is 
+		 * transferred to the worker, so the `pixels` will no longer be usable after calling
+		 * this function.
+		 * @param {ImageData} pixels 
+		 * @param {number} x 
+		 * @param {number} y 
+		 */
+		static uploadToAtlas(pixels, x, y) {
+			Draw.send(
+				"uploadToAtlas",
+				[pixels.data.buffer],
+				pixels.data.buffer,
+				pixels.width,
+				pixels.height,
+				x,
+				y
 			);
 		}
-		geometryIndex = 0;
-		vertexCount = 0;
+
+		static updateScreenTransform() {
+			if (Draw.canvas) {
+				Draw.xToScreenX = scaleFactor / Draw.canvas.width;
+				Draw.yToScreenY = -scaleFactor / Draw.canvas.height;
+				Draw.xOffset = Draw.canvas.width * -0.5;
+				Draw.yOffset = Draw.canvas.height * -0.5;
+			}
+		}
+
+		/** @private @readonly */
+		static maxVertices = 2048 * 4;
+
+		/** @private @readonly */
+		static vertexBufferSize =
+			24 * // Bytes per vertex
+			3 * // Vertices per triangle
+			2 * // Triangles per quad
+			Draw.maxVertices;
+
+		/** @private */
+		static geometryBuffer = new DataView(new ArrayBuffer(Draw.vertexBufferSize));
+
+		/** @private */
+		static geometryIndex = 0;
+
+		/** @private */
+		static vertexCount = 0;
+
+		/** @private @readonly */
+		static isLittleEndian = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+		/** @type {Worker?} */
+		static worker = null;
+
+		/** @type {HTMLCanvasElement?} */
+		static canvas = null;
+
+		static xToScreenX = 0;
+		static yToScreenY = 0;
+		static xOffset = 0;
+		static yOffset = 0;
 	}
 
-	// Geometry parameters
-
-	const maxQuads = 2048;
-	const vertexSize = 24;
-	const triangleSize = 3 * vertexSize;
-	const quadSize = 2 * triangleSize;
-	const bufferSize = maxQuads * quadSize;
-	let geometryBuffer = new DataView(new ArrayBuffer(bufferSize));
-	let geometryIndex = 0;
-
-	let vertexCount = 0;
-
-	let xScaleCanvas = 0;
-	let yScaleCanvas = 0;
-	let xOffset = 0;
-	let yOffset = 0;
 	let previousScreenX = ig.game.screen.x;
 	let previousScreenY = ig.game.screen.y;
 	let deltaX = 0;
 	let deltaY = 0;
 
-	const littleEndian = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
-
-	/**
-	 * 
-	 * @param {number} x 
-	 * @param {number} y 
-	 * @param {number} deltaX 
-	 * @param {number} deltaY 
-	 * @param {number} u 
-	 * @param {number} v 
-	 * @param {Uint8Array} color
-	 */
-	function drawVertex(x, y, deltaX, deltaY, u, v, color) {
-		geometryBuffer.setFloat32(geometryIndex, x, littleEndian);
-		geometryIndex += 4;
-
-		geometryBuffer.setFloat32(geometryIndex, y, littleEndian);
-		geometryIndex += 4;
-
-		geometryBuffer.setFloat32(geometryIndex, deltaX, littleEndian);
-		geometryIndex += 4;
-
-		geometryBuffer.setFloat32(geometryIndex, deltaY, littleEndian);
-		geometryIndex += 4;
-
-		geometryBuffer.setInt16(geometryIndex, u, littleEndian);
-		geometryIndex += 2;
-
-		geometryBuffer.setInt16(geometryIndex, v, littleEndian);
-		geometryIndex += 2;
-
-		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[0]));
-		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[1]));
-		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[2]));
-		geometryBuffer.setUint8(geometryIndex++, /** @type {any} */(color[3]));
-	}
+	Draw.initialize();
 
 	const msPerTick = 1000 / updatesPerSecond;
 	const deltaTime = 1 / updatesPerSecond;
 	const interpolationFactor = updatesPerSecond / 1000;
 	function gameLoop() {
 		ig.system.run();
-		sendInterpolation(tickCount * msPerTick, interpolationFactor);
+		Draw.finalize(tickCount * msPerTick, interpolationFactor);
 		tickCount++;
 		let waitTime = msPerTick * tickCount - Date.now();
 		if (waitTime < -500) {
@@ -1152,8 +1194,8 @@ ig.module("plugins.plentyland.graphics").requires(
 				const previousY = this.pl_previousY ?? scrollY;
 				const savedDeltaX = deltaX;
 				const savedDeltaY = deltaY;
-				deltaX = (previousX - scrollX) * xScaleCanvas * ig.system.scale;
-				deltaY = (previousY - scrollY) * yScaleCanvas * ig.system.scale;
+				deltaX = (previousX - scrollX) * Draw.xToScreenX * ig.system.scale;
+				deltaY = (previousY - scrollY) * Draw.yToScreenY * ig.system.scale;
 				this.parent();
 				this.pl_previousX = scrollX;
 				this.pl_previousY = scrollY;
@@ -1201,17 +1243,20 @@ ig.module("plugins.plentyland.graphics").requires(
 	// Inject into draw logic
 	MLand.inject({
 		draw: function () {
-			xScaleCanvas = scaleFactor / canvas.width;
-			yScaleCanvas = -scaleFactor / canvas.height;
-			xOffset = canvas.width * -0.5;
-			yOffset = canvas.height * -0.5;
+			Draw.updateScreenTransform();
 			const screenX = ig.game.screen.x;
 			const screenY = ig.game.screen.y;
-			deltaX = (previousScreenX - screenX) * xScaleCanvas * ig.system.scale;
-			deltaY = (previousScreenY - screenY) * yScaleCanvas * ig.system.scale;
+			deltaX = (previousScreenX - screenX) * Draw.xToScreenX * ig.system.scale;
+			deltaY = (previousScreenY - screenY) * Draw.yToScreenY * ig.system.scale;
 			previousScreenX = screenX;
 			previousScreenY = screenY;
 			this.parent();
 		}
 	});
-}));
+});
+
+/** 
+ * @typedef {{
+ * 		returnBuffer: (buffer: ArrayBuffer) => void
+ * }} ClientCommands
+ */
