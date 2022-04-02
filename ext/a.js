@@ -41,194 +41,224 @@ ig.module("plugins.plentyland").requires(
 	plentyland.player.say("plentyland active");
 });
 
-// Audio fixes
-ig.module("plugins.plentyland.audio").requires(
-	"plugins.plentyland",
-	"plugins.mland-soundextensions",
-	"game.core.brainmanager"
-).defines(() => {
-	if (!ig.Sound.enabled || !window.AudioContext || !window.Promise) {
-		return;
-	}
-
-	// Choose a compatible audio extension, mirroring Impact's method
-	let extension = "";
-	if (window.Audio) {
-		let testAudio = new Audio();
-		for (const format of ig.Sound.use) {
-			if (testAudio.canPlayType(format.mime)) {
-				extension = format.ext;
-				break;
-			}
-		}
-	}
-	if (!extension) {
-		return;
-	}
-
-	/**
-	 * Describes `ig.Sound` with Plentyland's modifications.
-	 * @typedef {{
-	 * 		pl_group: Set<PlentylandSound> | null | undefined,
-	 * 		pl_isLoading: boolean | undefined,
-	 * 		pl_buffer: AudioBuffer,
-	 * 		pl_playing: Set<AudioNode> | undefined,
-	 * 		pl_played: boolean | undefined,
-	 * 		path: string,
-	 * 		volume: number,
-	 * 		play: (this: PlentylandSound) => void,
-	 * 		stop: (this: PlentylandSound) => void,
-	 * 		load: (this: PlentylandSound) => void
-	 * }} PlentylandSound 
-	 */
-
-	// Functionality to load all of an instrument's notes once the first note is played.
-	// Deleting this block safely disables the feature.
-	{
-		/** @type {Map<string,Set<PlentylandSound>>} */
-		const soundGroups = new Map();
-		const sounds = ig.game.sounds;
-		for (const name in sounds) {
-			/** @type {PlentylandSound} */
-			const sound = sounds[name];
-			if (sound instanceof ig.Sound) {
-				const match = name.match(/_[0-9]/);
-				if (match) {
-					const prefix = name.substring(0, match.index || 0);
-					if (prefix in ig.game.sounds.instruments) {
-						let group = soundGroups.get(prefix);
-						if (!group) {
-							group = new Set();
-							soundGroups.set(prefix, group);
-						}
-						group.add(sound);
-						sound.pl_group = group;
-					}
-				}
-			}
-		}
-	}
-
-	const audio = new AudioContext();
-
-	/** The destination all sounds will connect to. */
-	const destination = (() => {
-		// This node prevents audio from clipping
-		if (!window.DynamicsCompressorNode) {
-			return audio.destination;
-		}
-		const compressor = audio.createDynamicsCompressor();
-		// Configure compressor to act effectively as a limiter.
-		compressor.knee.value = 0;
-		compressor.ratio.value = 20;
-		compressor.attack.value = 0.003;
-		compressor.release.value = 1;
-		compressor.threshold.value = -6;
-		compressor.connect(audio.destination);
-		return compressor;
-	})();
-
-
-	// Reimplementation of ig.Sound, including functionality from `mland-soundextensions`
-
-	ig.Sound.inject(/** @type {Partial<PlentylandSound>} */({
-		load: function () {
-			// Load the sounds associated with this sound's group.
-			const group = this.pl_group;
-			this.pl_group = null;
-			if (group) {
-				group.delete(this);
-				group.forEach(sound => {
-					sound.pl_group = null;
-					sound.load();
-				})
-			}
-			// Check if already loaded
-			if (!this.pl_buffer && !this.pl_isLoading) {
-				this.pl_isLoading = true;
-				// Path logic as defined in Impact's code
-				const path =
-					ig.prefix +
-					this.path.replace(/[^\.]+$/, extension) +
-					ig.nocache;
-				// Fetch and decode sound file
-				fetch(path)
-					.then(response => response.arrayBuffer())
-					.then(data => audio.decodeAudioData(data))
-					.then(buffer => {
-						this.pl_buffer = buffer;
-						if (this.pl_played) {
-							this.pl_played = false;
-							this.play();
-						}
-						this.pl_isLoading = false;
-					})
-					.catch(() => {
-						this.pl_isLoading = false;
-					});
-			}
-		},
-		play: function () {
-			if (
-				ig.game.settings.doPlaySound &&
-				!plentyland.player[plentyland.isWearing]("mutesAll") &&
-				ig.Sound.enabled
-			) {
-				const buffer = this.pl_buffer;
-				if (buffer) {
-					// Report to brainManager
-					plentyland.brainManagerOnSound(this.path);
-
-					// Set up audio nodes
-					const source = audio.createBufferSource();
-					source.buffer = buffer;
-					const gain = audio.createGain();
-					gain.gain.value = this.volume * plentyland.soundManager.volume;
-					source.connect(gain);
-					gain.connect(destination);
-					source.start();
-					source.onended = () => {
-						gain.disconnect();
-						this.pl_playing?.delete(gain);
-					};
-
-					// Add audio node to the currently playing list
-					if (!this.pl_playing) {
-						this.pl_playing = new Set();
-					}
-					this.pl_playing.add(gain);
-
-					// Some browsers pause the audio context if there's no user interaction
-					audio.resume();
-				} else {
-					this.pl_played = true;
-					this.load();
-				}
-			}
-		},
-		stop: function () {
-			// Prevent any currently loading sounds from playing
-			this.pl_played = false;
-
-			// Stop all currently playing sounds
-			const playing = this.pl_playing;
-			if (playing) {
-				playing.forEach(node => {
-					node.disconnect();
-				})
-				playing.clear();
-			}
-		}
-	}));
-});
-
 // A reimplementation of the graphics engine to use WebGL in a worker. The game now draws at a much
 // lower framerate, but interpolates between frames. This results in a huge performance win, 
 // making the game viable on much more hardware while still feeling smooth.
 // The lower update rate causes some issues with code that assumes 60fps.
 ig.module("plugins.plentyland.graphics").requires(
-	"plugins.plentyland"
+	"plugins.plentyland",
+	"plugins.mland-soundextensions",
+	"game.core.brainmanager"
 ).defines(() => {
+
+	/**
+	 * Describes `ig.Sound` with Plentyland's modifications.
+	 * @typedef {{
+	 * 		pl_info?: SoundInfo
+	 * 		path: string,
+	 * 		volume: number,
+	 * 		play: (this: PlentySound) => void,
+	 * 		stop: (this: PlentySound) => void,
+	 * 		load: (this: PlentySound) => void
+	 * }} PlentySound 
+	 */
+
+	/**
+	 * Data attached to Manyland sounds used by the new audio implementation
+	 */
+	class SoundInfo {
+		/** @type {Set<PlentySound>?} */
+		group = null;
+		isLoading = false;
+		/** @type {AudioBuffer?} */
+		buffer = null;
+		/** @type {Set<AudioNode>} */
+		playing = new Set();
+		played = false;
+
+		/**
+		 * @param {PlentySound} sound
+		 */
+		static get(sound) {
+			let info = sound.pl_info;
+			if (!info) {
+				info = sound.pl_info = new SoundInfo();
+			}
+			return info;
+		}
+
+		/**
+		 * The gain applied to all sounds. Meant to help quiet down Manyland's default volume so
+		 * that the compressor doesn't kick in as often.
+		 */
+		static globalGain = 0.4;
+	}
+
+	function initializeAudio() {
+		if (!ig.Sound.enabled || !window.AudioContext || !window.Promise) {
+			return;
+		}
+
+		// Choose a compatible audio extension, mirroring Impact's method
+		let extension = "";
+		if (window.Audio) {
+			let testAudio = new Audio();
+			for (const format of ig.Sound.use) {
+				if (testAudio.canPlayType(format.mime)) {
+					extension = format.ext;
+					break;
+				}
+			}
+		}
+		if (!extension) {
+			return;
+		}
+
+		// Functionality to load all of an instrument's notes once the first note is played.
+		// Deleting this block safely disables the feature.
+		{
+			/** @type {Map<string,Set<PlentySound>>} */
+			const soundGroups = new Map();
+			const sounds = ig.game.sounds;
+			for (const name in sounds) {
+				/** @type {PlentySound} */
+				const sound = sounds[name];
+				if (sound instanceof ig.Sound) {
+					const match = name.match(/_[0-9]/);
+					if (match) {
+						const prefix = name.substring(0, match.index || 0);
+						if (prefix in ig.game.sounds.instruments) {
+							let group = soundGroups.get(prefix);
+							if (!group) {
+								group = new Set();
+								soundGroups.set(prefix, group);
+							}
+							group.add(sound);
+							SoundInfo.get(sound).group = group;
+						}
+					}
+				}
+			}
+		}
+
+		const audio = new AudioContext();
+
+		/** The destination all sounds will connect to. */
+		const destination = (() => {
+			// This node prevents audio from clipping
+			if (!window.DynamicsCompressorNode) {
+				return audio.destination;
+			}
+			const compressor = audio.createDynamicsCompressor();
+			// Configure compressor to act effectively as a limiter.
+			compressor.knee.value = 0;
+			compressor.ratio.value = 20;
+			compressor.attack.value = 0.003;
+			compressor.release.value = 1;
+			compressor.threshold.value = -6;
+			compressor.connect(audio.destination);
+			return compressor;
+		})();
+
+
+		// Reimplementation of ig.Sound, including functionality from `mland-soundextensions`
+
+		ig.Sound.inject(/** @type {Partial<PlentySound>} */({
+			load: function () {
+				const info = SoundInfo.get(this);
+				// Load the sounds associated with this sound's group.
+				const group = info.group;
+				info.group = null;
+				if (group) {
+					group.delete(this);
+					group.forEach(sound => {
+						info.group = null;
+						sound.load();
+					})
+				}
+				// Check if already loaded
+				if (!info.buffer && !info.isLoading) {
+					info.isLoading = true;
+					// Path logic as defined in Impact's code
+					const path =
+						ig.prefix +
+						this.path.replace(/[^\.]+$/, extension) +
+						ig.nocache;
+					// Fetch and decode sound file
+					fetch(path)
+						.then(response => response.arrayBuffer())
+						.then(data => audio.decodeAudioData(data))
+						.then(buffer => {
+							info.buffer = buffer;
+							if (info.played) {
+								info.played = false;
+								this.play();
+							}
+							info.isLoading = false;
+						})
+						.catch(() => {
+							info.isLoading = false;
+						});
+				}
+			},
+			play: function () {
+				if (
+					ig.game.settings.doPlaySound &&
+					!plentyland.player[plentyland.isWearing]("mutesAll") &&
+					ig.Sound.enabled
+				) {
+					const info = SoundInfo.get(this);
+					const buffer = info.buffer;
+					if (buffer) {
+						// Report to brainManager
+						plentyland.brainManagerOnSound(this.path);
+
+						// Set up audio nodes
+						const source = audio.createBufferSource();
+						source.buffer = buffer;
+						const gain = audio.createGain();
+						gain.gain.value =
+							this.volume *
+							plentyland.soundManager.volume *
+							SoundInfo.globalGain;
+						source.connect(gain);
+						gain.connect(destination);
+						source.start();
+						source.onended = () => {
+							gain.disconnect();
+							info.playing?.delete(gain);
+						};
+
+						// Add audio node to the currently playing list
+						if (!info.playing) {
+							info.playing = new Set();
+						}
+						info.playing.add(gain);
+
+						// Some browsers pause the audio context if there's no user interaction
+						audio.resume();
+					} else {
+						info.played = true;
+						this.load();
+					}
+				}
+			},
+			stop: function () {
+				const info = SoundInfo.get(this);
+				// Prevent any currently loading sounds from playing
+				info.played = false;
+
+				// Stop all currently playing sounds
+				const playing = info.playing;
+				if (playing) {
+					playing.forEach(node => {
+						node.disconnect();
+					})
+					playing.clear();
+				}
+			}
+		}));
+	}
 
 	let drawCount = 500;
 	function logDraw(value) {
@@ -1311,11 +1341,10 @@ ig.module("plugins.plentyland.graphics").requires(
 		static updatesPerSecond = 20;
 	}
 
+	initializeAudio();
 	Draw.initialize().then(() => {
 		Interpolation.initialize();
 	});
-
-
 });
 
 /** 
