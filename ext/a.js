@@ -230,14 +230,6 @@ ig.module("plugins.plentyland.graphics").requires(
 	"plugins.plentyland"
 ).defines(() => {
 
-	// This how often the game is updated and drawn. WebGL interpolates between draws.
-	const updatesPerSecond = 20;
-
-	// Cancel main game loop (we will be implementing our own)
-	ig[plentyland.cancelLoop](ig.system[plentyland.cancelId]);
-
-	const scaleFactor = 2;
-
 	let drawCount = 500;
 	function logDraw(value) {
 		if (drawCount-- > 0) {
@@ -395,11 +387,11 @@ ig.module("plugins.plentyland.graphics").requires(
 			const sourceHeight = Math.min(Math.ceil(sh), image.height);
 			const dx2 = dx + dw;
 			const dy2 = dy + dh;
+			const transform = this.state.transform;
 			let x1;
 			let y1;
 			let x2;
 			let y2;
-			const transform = this.state.transform;
 			if (this.state.isIdentity) {
 				x1 = dx;
 				y1 = dy;
@@ -415,27 +407,10 @@ ig.module("plugins.plentyland.graphics").requires(
 			y1 = (Draw.yOffset + y1) * Draw.yToScreenY;
 			x2 = (Draw.xOffset + x2) * Draw.xToScreenX;
 			y2 = (Draw.yOffset + y2) * Draw.yToScreenY;
-			let imageDeltaX = deltaX;
-			let imageDeltaY = deltaY;
-			if (interpolation !== null) {
-				if (interpolation.capacity - 2 <= interpolation.index) {
-					interpolation.capacity += 2;
-					if (interpolation.capacity > interpolation.points.length) {
-						const newPoints = new Float64Array(interpolation.capacity * 2);
-						newPoints.set(interpolation.points);
-						interpolation.points = newPoints;
-					}
-				} else {
-					imageDeltaX = x1 - /** @type {number} */(
-						interpolation.points[interpolation.index]
-					);
-					imageDeltaY = y1 - /** @type {number} */(
-						interpolation.points[interpolation.index + 1]
-					);
-				}
-				interpolation.points[interpolation.index++] = x1;
-				interpolation.points[interpolation.index++] = y1;
-			}
+
+			const deltaX = Interpolation.getDeltaX(x1);
+			const deltaY = Interpolation.getDeltaY(y1);
+
 			const reservation =
 				Atlas.getReservation(image, sourceX, sourceY, sourceWidth, sourceHeight);
 
@@ -449,12 +424,12 @@ ig.module("plugins.plentyland.graphics").requires(
 			const u2 = u1 + sw;
 			const v2 = v1 + sh;
 			Draw.rectangle(
-				x1 - imageDeltaX,
-				y1 - imageDeltaY,
-				x2 - imageDeltaX,
-				y2 - imageDeltaY,
-				imageDeltaX,
-				imageDeltaY,
+				x1 - deltaX,
+				y1 - deltaY,
+				x2 - deltaX,
+				y2 - deltaY,
+				deltaX,
+				deltaY,
 				u1,
 				v2,
 				u2,
@@ -813,7 +788,7 @@ ig.module("plugins.plentyland.graphics").requires(
 					throw new Error("No candidate found despite splitting a larger one.");
 				}
 			}
-			if (candidateNode && candidateAge !== tickCount) {
+			if (candidateNode && candidateAge !== Interpolation.currentTick) {
 				// A candidate was found, so set the given reservation to allocated and deallocate
 				// the candidate.
 				reservation.x = candidateX;
@@ -850,7 +825,7 @@ ig.module("plugins.plentyland.graphics").requires(
 						", " +
 						child.y +
 						" last drawn " +
-						(tickCount - child.lastDrawn) +
+						(Interpolation.currentTick - child.lastDrawn) +
 						" atlas count " +
 						Atlas.count
 					);
@@ -900,7 +875,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 */
 		reserve(image, x, y, width, height) {
 			if (!this.allocated) {
-				if (this.lastDrawn >= tickCount) {
+				if (this.lastDrawn >= Interpolation.currentTick) {
 					// We're in cooldown from a failed allocation.
 					return false;
 				}
@@ -909,7 +884,7 @@ ig.module("plugins.plentyland.graphics").requires(
 				if (!Atlas.allocate(this, width, height)) {
 					consoleref.warn(`Unable to allocate ${width}x${height} image`);
 					// Set this reservation on cool down to limit thrashing of the algorithm
-					this.lastDrawn = tickCount + Math.ceil(Math.random() * updatesPerSecond);
+					this.lastDrawn = Interpolation.currentTick;
 					return false;
 				}
 				const pixels = context.getImageData(x, y, width, height);
@@ -918,7 +893,7 @@ ig.module("plugins.plentyland.graphics").requires(
 				);
 				Draw.uploadToAtlas(pixels, this.x, this.y);
 			}
-			this.lastDrawn = tickCount;
+			this.lastDrawn = Interpolation.currentTick;
 			return true;
 		}
 	}
@@ -1093,8 +1068,8 @@ ig.module("plugins.plentyland.graphics").requires(
 
 		static updateScreenTransform() {
 			if (Draw.canvas) {
-				Draw.xToScreenX = scaleFactor / Draw.canvas.width;
-				Draw.yToScreenY = -scaleFactor / Draw.canvas.height;
+				Draw.xToScreenX = 2 / Draw.canvas.width;
+				Draw.yToScreenY = -2 / Draw.canvas.height;
 				Draw.xOffset = Draw.canvas.width * -0.5;
 				Draw.yOffset = Draw.canvas.height * -0.5;
 			}
@@ -1134,132 +1109,213 @@ ig.module("plugins.plentyland.graphics").requires(
 		static yOffset = 0;
 	}
 
-	let previousScreenX = ig.game.screen.x;
-	let previousScreenY = ig.game.screen.y;
-	let deltaX = 0;
-	let deltaY = 0;
+	class Interpolation {
+		lastTick = 0;
+		count = 0;
+		index = 0;
+		list = new Float64Array(8);
 
-	Draw.initialize();
+		static initialize() {
+			ig.BackgroundMap.inject({
+				/**
+				 * @this {{
+				 * 		pl_previousX?: number,
+				 * 		pl_previousY?: number,
+				 * 		scroll: {x: number, y: number}
+				 * 		parent: () => void,
+				 * }}
+				 */
+				draw: function () {
+					const scrollX = this.scroll.x + ig.game.O598.originX;
+					const scrollY = this.scroll.y + ig.game.O598.originY;
+					const previousX = this.pl_previousX ?? scrollX;
+					const previousY = this.pl_previousY ?? scrollY;
+					const savedDeltaX = Interpolation.deltaX;
+					const savedDeltaY = Interpolation.deltaY;
+					Interpolation.deltaX =
+						(previousX - scrollX) * Draw.xToScreenX * ig.system.scale;
+					Interpolation.deltaY =
+						(previousY - scrollY) * Draw.yToScreenY * ig.system.scale;
+					this.parent();
+					this.pl_previousX = scrollX;
+					this.pl_previousY = scrollY;
+					Interpolation.deltaX = savedDeltaX;
+					Interpolation.deltaY = savedDeltaY;
+				}
+			});
 
-	const msPerTick = 1000 / updatesPerSecond;
-	const deltaTime = 1 / updatesPerSecond;
-	const interpolationFactor = updatesPerSecond / 1000;
-	function gameLoop() {
-		ig.system.run();
-		Draw.finalize(tickCount * msPerTick, interpolationFactor);
-		tickCount++;
-		let waitTime = msPerTick * tickCount - Date.now();
-		if (waitTime < -500) {
-			tickCount = Math.ceil(Date.now() / msPerTick);
-			waitTime = msPerTick * tickCount - Date.now();
-		}
-		setTimeout(gameLoop, waitTime);
-	}
-	let tickCount = Math.ceil(Date.now() / msPerTick);
-	setTimeout(gameLoop, msPerTick * tickCount - Date.now());
-	Object.defineProperties(ig.system, {
-		tick: {
-			get: function () { return deltaTime; }
-		},
-		fps: {
-			get: function () { return 60; }
-		}
-	});
+			const msPerTick = 1000 / Interpolation.updatesPerSecond;
+			const deltaTime = 1 / Interpolation.updatesPerSecond;
+			const interpolationFactor = Interpolation.updatesPerSecond / 1000;
 
-	/**
-	 * @typedef {{
-	 * 		pl_interpolation?: Interpolation
-	 * }} HasInterpolation
-	 */
-
-	/** 
-	 * @typedef {{
-	 * 		lastTick: number,
-	 * 		capacity: number,
-	 * 		index: number,
-	 * 		points: Float64Array,
-	 * }} Interpolation
-	 */
-
-	/** @type {Interpolation?} */
-	let interpolation = null;
-
-	ig.BackgroundMap.inject({
-		/**
-		 * @this {{
-		 * 		pl_previousX?: number,
-		 * 		pl_previousY?: number,
-		 * 		scroll: {x: number, y: number}
-		 * 		parent: () => void,
-		 * }}
-		 */
-		draw:
-			function drawMap() {
-				const scrollX = this.scroll.x + ig.game.O598.originX;
-				const scrollY = this.scroll.y + ig.game.O598.originY;
-				const previousX = this.pl_previousX ?? scrollX;
-				const previousY = this.pl_previousY ?? scrollY;
-				const savedDeltaX = deltaX;
-				const savedDeltaY = deltaY;
-				deltaX = (previousX - scrollX) * Draw.xToScreenX * ig.system.scale;
-				deltaY = (previousY - scrollY) * Draw.yToScreenY * ig.system.scale;
-				this.parent();
-				this.pl_previousX = scrollX;
-				this.pl_previousY = scrollY;
-				deltaX = savedDeltaX;
-				deltaY = savedDeltaY;
+			// Replace game loop
+			ig[plentyland.cancelLoop](ig.system[plentyland.cancelId]);
+			function gameLoop() {
+				ig.system.run();
+				Draw.finalize(Interpolation.currentTick * msPerTick, interpolationFactor);
+				Interpolation.currentTick++;
+				let waitTime = msPerTick * Interpolation.currentTick - Date.now();
+				if (waitTime < -500) {
+					Interpolation.currentTick = Math.ceil(Date.now() / msPerTick);
+					waitTime = msPerTick * Interpolation.currentTick - Date.now();
+				}
+				setTimeout(gameLoop, waitTime);
 			}
-	});
 
-	const excludeDraw = new Set([window.MLand.prototype, window.Item.prototype]);
+			Interpolation.currentTick = Math.ceil(Date.now() / msPerTick);
+			setTimeout(gameLoop, msPerTick * Interpolation.currentTick - Date.now());
+			Object.defineProperties(ig.system, {
+				tick: {
+					get: function () { return deltaTime; }
+				},
+				fps: {
+					get: function () { return 60; }
+				}
+			});
 
-	for (const key in window) {
-		const value = /** @type {any} */(window)[key];
-		if (!(value instanceof Object)) { continue; }
-		const prototype = value.prototype;
-		if (!(prototype instanceof Object) || excludeDraw.has(prototype)) { continue; }
-		const draw = prototype.draw;
-		if (typeof draw !== "function") { continue; }
-		/**
-		 * @this {HasInterpolation}
-		 */
-		prototype.draw = function () {
-			let myInterpolation = this.pl_interpolation;
-			if (!myInterpolation) {
-				myInterpolation = this.pl_interpolation = {
-					lastTick: 0,
-					capacity: 0,
-					index: 0,
-					points: new Float64Array(2)
-				};
-			}
-			if (myInterpolation.lastTick < tickCount) {
-				myInterpolation.index = 0;
-				if (myInterpolation.lastTick < tickCount - 1) {
-					myInterpolation.capacity = 0;
+			/**
+			 * @typedef {{
+			 * 		pl_interpolation?: Interpolation
+			 * }} HasInterpolation
+			 */
+
+			const excludeDraw = new Set([window.MLand.prototype, window.Item.prototype]);
+
+			// Inject interpolation tracking into Manyland's draw functions.
+			for (const key in window) {
+				// Find manyland's entity types with draw commands.
+				const value = /** @type {any} */(window)[key];
+				if (!(value instanceof Object)) { continue; }
+				const prototype = value.prototype;
+				if (!(prototype instanceof Object) || excludeDraw.has(prototype)) { continue; }
+
+				// Inject our own draw command that tracks interpolation.
+				const draw = prototype.draw;
+				if (typeof draw !== "function") { continue; }
+				/**
+				 * @this {{
+				 * 		pl_interpolation?: Interpolation
+				 * }}
+				 */
+				prototype.draw = function () {
+					let interpolation = this.pl_interpolation;
+					if (!interpolation) {
+						interpolation = this.pl_interpolation = new Interpolation();
+					}
+					if (interpolation.lastTick < Interpolation.currentTick) {
+						interpolation.index = 0;
+						if (interpolation.lastTick < Interpolation.currentTick - 1) {
+							interpolation.count = 0;
+						}
+					}
+					const savedInterpolation = Interpolation.current;
+					Interpolation.current = interpolation;
+					draw.apply(this, arguments);
+					Interpolation.current.lastTick = Interpolation.currentTick;
+					Interpolation.current = savedInterpolation;
 				}
 			}
-			const savedInterpolation = interpolation;
-			interpolation = myInterpolation;
-			draw.apply(this, arguments);
-			interpolation.lastTick = tickCount;
-			interpolation = savedInterpolation;
+
+			// Get updates for every game draw.
+			MLand.inject({
+				draw: function () {
+					Draw.updateScreenTransform();
+					const screenX = ig.game.screen.x;
+					const screenY = ig.game.screen.y;
+					Interpolation.deltaX =
+						(Interpolation.previousScreenX - screenX) *
+						Draw.xToScreenX * ig.system.scale;
+					Interpolation.deltaY =
+						(Interpolation.previousScreenY - screenY) *
+						Draw.yToScreenY * ig.system.scale;
+					Interpolation.previousScreenX = screenX;
+					Interpolation.previousScreenY = screenY;
+					this.parent();
+				}
+			});
 		}
+
+		/**
+		 * @private
+		 * @param {Interpolation} interpolation 
+		 * @param {number} currentValue
+		 */
+		static getDelta(interpolation, currentValue) {
+			const list = interpolation.list;
+			if (interpolation.index < interpolation.count) {
+				const value = /** @type {number} */(list[interpolation.index]);
+				list[interpolation.index] = currentValue;
+				interpolation.index++;
+				return currentValue - value;
+			} else {
+				interpolation.count++;
+				if (interpolation.count > list.length) {
+					interpolation.list = new Float64Array(list.length * 2);
+					interpolation.list.set(list);
+				}
+				interpolation.list[interpolation.index] = currentValue;
+				interpolation.index++;
+				return 0;
+			}
+		}
+
+		/**
+		 * Get the change in x from the current interpolation state.
+		 * @param {number} value 
+		 */
+		static getDeltaX(value) {
+			const current = Interpolation.current;
+			if (current) {
+				return Interpolation.getDelta(current, value);
+			} else {
+				return Interpolation.deltaX;
+			}
+		}
+
+		/**
+		 * Get the change in y from the current interpolation state.
+		 * @param {number} value 
+		 */
+		static getDeltaY(value) {
+			const current = Interpolation.current;
+			if (current) {
+				return Interpolation.getDelta(current, value);
+			} else {
+				return Interpolation.deltaY;
+			}
+		}
+
+		/** @private */
+		static previousScreenX = 0;
+		/** @private */
+		static previousScreenY = 0;
+		/** @private */
+		static deltaX = 0;
+		/** @private */
+		static deltaY = 0;
+
+		static currentTick = 0;
+
+		/**
+		 * @private
+		 * @type {Interpolation?}
+		 */
+		static current = null;
+
+		/**
+		 * How many times the game is updated and drawn per second.
+		 * WebGL smoothly interpolates between updates.
+		 * @private
+		 * @readonly
+		 */
+		static updatesPerSecond = 20;
 	}
 
-	// Inject into draw logic
-	MLand.inject({
-		draw: function () {
-			Draw.updateScreenTransform();
-			const screenX = ig.game.screen.x;
-			const screenY = ig.game.screen.y;
-			deltaX = (previousScreenX - screenX) * Draw.xToScreenX * ig.system.scale;
-			deltaY = (previousScreenY - screenY) * Draw.yToScreenY * ig.system.scale;
-			previousScreenX = screenX;
-			previousScreenY = screenY;
-			this.parent();
-		}
+	Draw.initialize().then(() => {
+		Interpolation.initialize();
 	});
+
+
 });
 
 /** 
