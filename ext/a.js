@@ -664,9 +664,9 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * A child of an `AtlasNode` which represents a quadrant in the node.
 		 * - `AtlasNode` indicates the quadrant is subdivided into sub-quadrants as specified by
 		 * the node's children.
-		 * - `Atlas.Reservation` represents a reservation that currently occupies the quadrant.
+		 * - `AtlasReservation` represents a reservation that currently occupies the quadrant.
 		 * - `null` indicates the quadrant is empty and available to be reserved.
-		 * @typedef {AtlasNode | Atlas.Reservation | null} AtlasChild
+		 * @typedef {AtlasNode | AtlasReservation | null} AtlasChild
 		 */
 
 		/**
@@ -676,7 +676,7 @@ ig.module("plugins.plentyland.graphics").requires(
 
 		/**
 		 * Returns the specific reservation for the given subsection of the `image`.
-		 * @param {HTMLCanvasElement & {pl_reservation?: Map<number, Atlas.Reservation>}} image 
+		 * @param {HTMLCanvasElement & {pl_reservation?: Map<number, AtlasReservation>}} image 
 		 * @param {number} x 
 		 * @param {number} y 
 		 * @param {number} width 
@@ -693,7 +693,7 @@ ig.module("plugins.plentyland.graphics").requires(
 			) * hashRange + height;
 			let reservation = map.get(allocationHash);
 			if (reservation === undefined) {
-				reservation = new Atlas.Reservation;
+				reservation = new AtlasReservation;
 				map.set(allocationHash, reservation);
 			}
 			return reservation;
@@ -703,7 +703,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		 * Reserves a space in the atlas that can accomodate the given width and height.
 		 * If there is no available space, the least recently drawn reservations are deallocated to
 		 * make space for the given reservation.
-		 * @param {Atlas.Reservation} reservation 
+		 * @param {AtlasReservation} reservation 
 		 * @param {number} width
 		 * @param {number} height
 		 * @returns {boolean} `true` if the allocation succeded. If `false`, allocation did not
@@ -857,11 +857,32 @@ ig.module("plugins.plentyland.graphics").requires(
 				}
 			}
 		}
+
+		/**
+		 * @private
+		 * The number of `Allocation`s currently allocated in the atlas.
+		 */
+		static count = 0;
+
+		/**
+		 * The root node of the atlas, which divides the whole texture into 4 equally sized quadrants.
+		 * @private
+		 * @readonly
+		 * @type {AtlasNode}
+		 */
+		static root = [null, null, null, null];
+
+		/**
+		 * The exponent of the size of the texture. In other words, the x in size = 2^x
+		 * @readonly
+		 */
+		static sizeMagnitude = 11;
 	}
+
 	/**
 	 * Represents an allocation in the atlas.
 	 */
-	Atlas.Reservation = class {
+	class AtlasReservation {
 		allocated = false;
 		lastDrawn = 0;
 		x = -1;
@@ -901,20 +922,6 @@ ig.module("plugins.plentyland.graphics").requires(
 			return true;
 		}
 	}
-
-	/** The number of `Allocation`s currently allocated in the atlas. */
-	Atlas.count = 0;
-
-	/**
-	 * The root node of the atlas, which divides the whole texture into 4 equally sized quadrants.
-	 * @type {AtlasNode}
-	 */
-	Atlas.root = [null, null, null, null];
-
-	/**
-	 * The exponent of the size of the texture. In other words, the x in size = 2^x
-	 */
-	Atlas.sizeMagnitude = 11;
 
 	const context = new PlentyContext();
 	ig.system.context = context;
