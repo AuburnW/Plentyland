@@ -1,55 +1,260 @@
-// Core functionality for Plentyland
-ig.module("plugins.plentyland").requires(
-	"game.main",
-	"impact.sound"
-).defines(() => {
-	window.plentyland = ig.Class.extend({});
-	plentyland.root = String(
-		/** @type {any} */(window).plentylandRoot ||
-		"https://auburn557.github.io/Plentyland/ext/"
-	);
-
-	/**
-	 * Asserts that the given value is an instance of the given type, then returns the value.
-	 * @param {any} value 
-	 * @param {Function|"number"|"boolean"|"function"|"string"|"object"|"undefined"} type 
-	 * @returns {any}
-	 */
-	function checkType(value, type) {
-		if (typeof value !== type && typeof type !== "string" && !(value instanceof type)) {
-			throw new Error("Plentyland needs to update obfuscation bindings");
-		}
-		return value;
-	}
-
-	// Bindings for obfuscated code. These will need to be updated every time obfuscation changes.
-	plentyland.player = checkType(ig.game.O8006, ig.Entity);
-	checkType(plentyland.player.say, Function);
-	plentyland.isWearing = "O7187";
-	checkType(plentyland.player[plentyland.isWearing], Function);
-	plentyland.soundManagerClass = checkType(ig.O1654, Function);
-	plentyland.soundManager = checkType(ig.O2212, plentyland.soundManagerClass);
-	plentyland.brainManagerOnSound = checkType(ig.game.brainManager.O5925, Function)
-		.bind(ig.game.brainManager);
-	plentyland.cancelLoop = "O884";
-	checkType(ig[plentyland.cancelLoop], Function);
-	plentyland.cancelId = "O869";
-	checkType(ig.system[plentyland.cancelId], "number");
-
-	// Finish
-
-	plentyland.player.say("plentyland active");
-});
-
-// A reimplementation of the graphics engine to use WebGL in a worker. The game now draws at a much
-// lower framerate, but interpolates between frames. This results in a huge performance win, 
-// making the game viable on much more hardware while still feeling smooth.
-// The lower update rate causes some issues with code that assumes 60fps.
-ig.module("plugins.plentyland.graphics").requires(
-	"plugins.plentyland",
+/** @type {any} */(window).ig.module("plugins.plentyland").requires(
+	"impact.sound",
 	"plugins.mland-soundextensions",
 	"game.core.brainmanager"
 ).defines(() => {
+	/**
+	 * Provides typed bindings to Manyland code.
+	 */
+	class Bindings {
+		/** Initializes bindings, finding obfuscated keys. */
+		static initialize() {
+			Bindings.bindByCriteria(
+				[Bindings.ig.game],
+				"pl_player",
+				Bindings.ig.Entity,
+				["say"],
+				[Object.getPrototypeOf(Bindings.ig.game)]
+			);
+			Bindings.bindByCriteria(
+				[Bindings.ig.game],
+				"pl_foregroundMap",
+				Object,
+				["originX", "originY"],
+				[Object.getPrototypeOf(Bindings.ig.game)]
+			);
+			Bindings.bindByCode(
+				Object.getPrototypeOf(Bindings.ig.game.pl_player),
+				/\. ?WEARABLE ?\].*\. ?attributes.*\. ?attributes ?\[/g,
+				"pl_getWearableAttribute"
+			);
+			Bindings.bindByCriteria(
+				[Bindings.ig],
+				"pl_soundManager",
+				Bindings.ig.Class,
+				["volume", "format", "clips"],
+			);
+			Bindings.bindByCode(
+				Object.getPrototypeOf(Bindings.ig.game.brainManager),
+				/staticResourcePrefix.*media\/sounds\//g,
+				"pl_onPlaySound"
+			);
+			Bindings.bindByCode(
+				Object.getPrototypeOf(Bindings.ig.system),
+				/ig ?\.[a-zA-Z0-9$_]+ ?\( ?this ?\. ?[a-zA-Z0-9$_]+ ?\).*this ?\. ?running ?=/g,
+				"pl_stop"
+			);
+
+		}
+
+		/**
+		 * Finds a binding by matching on the function's code.
+		 * @private
+		 * @template {object} T
+		 * @template {keyof T} K
+		 * @param {T} object 
+		 * @param {RegExp} pattern 
+		 * @param {K} exposeKey 
+		 * @param {[object]=} defineOn 
+		 */
+		static bindByCode(object, pattern, exposeKey, defineOn) {
+			Bindings.bindByPredicate(object, value => {
+				if (!(typeof value === "function")) { return false }
+				const code = String(value)
+					.replaceAll(/(\/\/.*?\n)|(\/\*.*?\*\/)/gs, "") // Remove comments
+					.replaceAll(/\s+/g, " ") // Normalize whitespace
+					.trim();
+				const match = [...code.matchAll(pattern)];
+				return match.length === 1;
+			}, exposeKey, defineOn);
+		}
+
+		/**
+		 * Finds a binding by matching against the given predicate.
+		 * @private
+		 * @template {object} T
+		 * @template {keyof T} K
+		 * @param {T} object 
+		 * @param {(value: any) => boolean} predicate 
+		 * @param {K} exposeKey 
+		 * @param {[object]=} defineOn 
+		 */
+		static bindByPredicate(object, predicate, exposeKey, defineOn) {
+			const candidates = Object.entries(object)
+				.filter(entry => predicate(entry[1]))
+				.map(entry => entry[0]);
+			if (candidates.length === 1) {
+				const key = String(candidates[0]);
+				Object.defineProperty(defineOn ?? object, exposeKey, {
+					get: function () { return this[key]; },
+					set: function (value) { /** @type {any} */(this)[key] = value; }
+				});
+			} else {
+				throw new Error(
+					"A single binding candidate was not found. Candidates: [" +
+					candidates.map(candidate => "`" + candidate + "`").join(", ") +
+					"]"
+				);
+			}
+		}
+
+		/**
+		 * Searches the given objects for a (potentially obfuscated) property fitting the given
+		 * parameters. If a single property is found, a binding to it is exposed with the given
+		 * name. If there are multiple or no properties found, an error is thrown.
+		 * 
+		 * This strategy is used rather than binding to obfuscated keys directly since it will
+		 * work whether the properties have been obfuscated or not. It also gives resiliance to
+		 * key randomization.
+		 * @private
+		 * @template {object} T
+		 * @template {keyof T} K
+		 * @param {T[]} objects The object containing the binding.
+		 * @param {K} exposeKey The property name to define which exposes the binding.
+		 * @param {(
+		 * 		Function |
+		 * 		"string" |
+		 * 		"number" |
+		 * 		"bigint" |
+		 * 		"boolean" |
+		 * 		"symbol" |
+		 * 		"undefined" |
+		 * 		"object" |
+		 * 		"function"
+		 * )} type The type of the value the property has.
+		 * @param {string[]} keys A list of keys which are present on the property's value.
+		 * @param {object[]=} defineOn The objects to define the property on. If not specified,
+		 * properties are defined on objects within the `objects` parameter.
+		 */
+		static bindByCriteria(objects, exposeKey, type, keys, defineOn) {
+			let candidates = new Set(objects.map(object => Object.keys(object)).flat());
+			outer: for (const candidate of [...candidates]) {
+				for (const object of objects) {
+					// Remove candidates that aren't in all the given objects.
+					if (!(candidate in object)) {
+						candidates.delete(candidate);
+						continue outer;
+					}
+
+					const value = /** @type {any} */(object)[candidate];
+
+					// Remove candidates that don't match the given type.
+					if (!(
+						typeof value === type ||
+						typeof type === "function" &&
+						value instanceof type
+					)) {
+						candidates.delete(candidate);
+						continue outer;
+					}
+
+					// Remove candidates that don't have the given keys.
+					for (const key of keys) {
+						if (!(key in value)) {
+							candidates.delete(candidate);
+							continue outer;
+						}
+					}
+				}
+			}
+			const finalCandidates = [...candidates];
+			if (finalCandidates.length === 1) {
+				const key = String(finalCandidates[0]);
+				for (const object of (defineOn ?? objects)) {
+					Object.defineProperty(object, exposeKey, {
+						get: function () { return this[key]; },
+						set: function (value) { /** @type {any} */(this)[key] = value; }
+					});
+				}
+			} else {
+				throw new Error(
+					"A single binding candidate was not found. Candidates: [" +
+					finalCandidates.map(candidate => "`" + candidate + "`").join(", ") +
+					"]"
+				);
+			}
+		}
+
+		/**
+		 * Utility property to cast the global object to `any`.
+		 * @private
+		 * @type {any}
+		 */
+		static get window() { return window; }
+
+		/**
+		 * Bindings into the global scope.
+		 * @type {{
+		 * 		plentylandRoot?: string,
+		 * 		Item: ImpactClass,
+		 * 		MLand: ImpactClass
+		 * }}
+		 */
+		static get self() { return /** @type {any} */(window); }
+
+		/**
+		 * Bindings into the [Impact game engine](https://impactjs.com/).
+		 * @type {{
+		 * 		nocache: string,
+		 * 		prefix: string,
+		 * 		Class: ImpactClass,
+		 * 		Entity: ImpactClass,
+		 * 		Sound: {
+		 * 			use: {mime: string, ext: string}[],
+		 * 			enabled: boolean
+		 * 		} & ImpactClass,
+		 * 		pl_soundManager: {
+		 * 			volume: number,
+		 * 			format: {mime: string, ext: string}[]
+		 * 		}
+		 * 		sounds: Record<string, PlentySound> & { instruments: Record<string, {}> },
+		 * 		game: {
+		 * 			settings: {
+		 * 				doPlaySound: boolean
+		 * 			},
+		 * 			pl_player: {
+		 * 				say: (message: string) => void,
+		 * 				attachments: Record<string, Attachment>
+		 * 				pl_getWearableAttribute: (attribute: string) => boolean
+		 * 			},
+		 * 			brainManager: {
+		 * 				pl_onPlaySound: (path: string) => void
+		 * 			},
+		 * 			pl_foregroundMap: {
+		 * 				originX: number,
+		 * 				originY: number,
+		 * 			},
+		 * 			screen: { x: number, y: number }
+		 * 		},
+		 * 		system: {
+		 * 			context: CanvasRenderingContext2D,
+		 * 			canvas: HTMLCanvasElement,
+		 * 			running: boolean,
+		 * 			scale: number,
+		 * 			pl_stop: () => void,
+		 * 			run: () => void
+		 * 		},
+		 * 		BackgroundMap: ImpactClass,
+		 * }}
+		 */
+		static get ig() { return Bindings.window.ig }
+
+		/** @type {Console} */
+		static get console() { return Bindings.window.consoleref; }
+	}
+	Bindings.initialize();
+
+	/**
+	 * @typedef {{
+	 * 		attributes?: Record<string, boolean>
+	 * }} Attachment
+	 */
+
+	/**
+	 * @typedef {Function & {
+	 * 		inject: (injection: Record<string, any>) => void
+	 * }} ImpactClass
+	 */
 
 	/**
 	 * Describes `ig.Sound` with Plentyland's modifications.
@@ -95,7 +300,7 @@ ig.module("plugins.plentyland.graphics").requires(
 	}
 
 	function initializeAudio() {
-		if (!ig.Sound.enabled || !window.AudioContext || !window.Promise) {
+		if (!Bindings.ig.Sound.enabled || !window.AudioContext || !window.Promise) {
 			return;
 		}
 
@@ -103,7 +308,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		let extension = "";
 		if (window.Audio) {
 			let testAudio = new Audio();
-			for (const format of ig.Sound.use) {
+			for (const format of Bindings.ig.Sound.use) {
 				if (testAudio.canPlayType(format.mime)) {
 					extension = format.ext;
 					break;
@@ -119,15 +324,14 @@ ig.module("plugins.plentyland.graphics").requires(
 		{
 			/** @type {Map<string,Set<PlentySound>>} */
 			const soundGroups = new Map();
-			const sounds = ig.game.sounds;
+			const sounds = Bindings.ig.sounds;
 			for (const name in sounds) {
-				/** @type {PlentySound} */
-				const sound = sounds[name];
-				if (sound instanceof ig.Sound) {
+				const sound = /** @type {PlentySound} */(sounds[name]);
+				if (sound instanceof Bindings.ig.Sound) {
 					const match = name.match(/_[0-9]/);
 					if (match) {
 						const prefix = name.substring(0, match.index || 0);
-						if (prefix in ig.game.sounds.instruments) {
+						if (prefix in Bindings.ig.sounds.instruments) {
 							let group = soundGroups.get(prefix);
 							if (!group) {
 								group = new Set();
@@ -163,7 +367,7 @@ ig.module("plugins.plentyland.graphics").requires(
 
 		// Reimplementation of ig.Sound, including functionality from `mland-soundextensions`
 
-		ig.Sound.inject(/** @type {Partial<PlentySound>} */({
+		Bindings.ig.Sound.inject(/** @type {Partial<PlentySound>} */({
 			load: function () {
 				const info = SoundInfo.get(this);
 				// Load the sounds associated with this sound's group.
@@ -181,9 +385,9 @@ ig.module("plugins.plentyland.graphics").requires(
 					info.isLoading = true;
 					// Path logic as defined in Impact's code
 					const path =
-						ig.prefix +
+						Bindings.ig.prefix +
 						this.path.replace(/[^\.]+$/, extension) +
-						ig.nocache;
+						Bindings.ig.nocache;
 					// Fetch and decode sound file
 					fetch(path)
 						.then(response => response.arrayBuffer())
@@ -203,15 +407,15 @@ ig.module("plugins.plentyland.graphics").requires(
 			},
 			play: function () {
 				if (
-					ig.game.settings.doPlaySound &&
-					!plentyland.player[plentyland.isWearing]("mutesAll") &&
-					ig.Sound.enabled
+					Bindings.ig.game.settings.doPlaySound &&
+					!Bindings.ig.game.pl_player.pl_getWearableAttribute("mutesAll") &&
+					Bindings.ig.Sound.enabled
 				) {
 					const info = SoundInfo.get(this);
 					const buffer = info.buffer;
 					if (buffer) {
 						// Report to brainManager
-						plentyland.brainManagerOnSound(this.path);
+						Bindings.ig.game.brainManager.pl_onPlaySound(this.path);
 
 						// Set up audio nodes
 						const source = audio.createBufferSource();
@@ -219,7 +423,7 @@ ig.module("plugins.plentyland.graphics").requires(
 						const gain = audio.createGain();
 						gain.gain.value =
 							this.volume *
-							plentyland.soundManager.volume *
+							Bindings.ig.pl_soundManager.volume *
 							SoundInfo.globalGain;
 						source.connect(gain);
 						gain.connect(destination);
@@ -261,9 +465,13 @@ ig.module("plugins.plentyland.graphics").requires(
 	}
 
 	let drawCount = 500;
+	/**
+	 * 
+	 * @param {any} value 
+	 */
 	function logDraw(value) {
 		if (drawCount-- > 0) {
-			consoleref.warn(value);
+			Bindings.console.warn(value);
 		}
 	}
 
@@ -617,6 +825,11 @@ ig.module("plugins.plentyland.graphics").requires(
 			logDraw({ lineTo: [x, y] });
 		}
 
+		/**
+		 * 
+		 * @param {"string"|object} fillRuleOrPath 
+		 * @param {"string"} fillRule 
+		 */
 		clip(fillRuleOrPath, fillRule) {
 			logDraw({ clip: [fillRuleOrPath, fillRule] });
 		}
@@ -849,7 +1062,7 @@ ig.module("plugins.plentyland.graphics").requires(
 					child.x = -1;
 					child.y = -1;
 					Atlas.count--;
-					consoleref.log(
+					Bindings.console.log(
 						"Deallocated at " +
 						child.x +
 						", " +
@@ -912,13 +1125,13 @@ ig.module("plugins.plentyland.graphics").requires(
 				const context = image.getContext("2d");
 				if (!context) { throw new Error("Unable to create context") }
 				if (!Atlas.allocate(this, width, height)) {
-					consoleref.warn(`Unable to allocate ${width}x${height} image`);
+					Bindings.console.warn(`Unable to allocate ${width}x${height} image`);
 					// Set this reservation on cool down to limit thrashing of the algorithm
 					this.lastDrawn = Interpolation.currentTick;
 					return false;
 				}
 				const pixels = context.getImageData(x, y, width, height);
-				consoleref.log(
+				Bindings.console.log(
 					`Loaded a ${pixels.width}x${pixels.height} image at (${this.x}, ${this.y})`
 				);
 				Draw.uploadToAtlas(pixels, this.x, this.y);
@@ -929,30 +1142,34 @@ ig.module("plugins.plentyland.graphics").requires(
 	}
 
 	const context = new PlentyContext();
-	ig.system.context = context;
+	Bindings.ig.system.context = /** @type {any} */(context);
 
 	class Draw {
 		static initialize() {
-			return fetch(String(new URL("worker.js", plentyland.root)))
+			const root = String(
+				Bindings.self.plentylandRoot ??
+				"https://auburn557.github.io/Plentyland/ext/"
+			);
+			return fetch(String(new URL("worker.js", root)))
 				.then(response => response.blob())
 				.then(blob => {
 					/** @type {ClientCommands} */
 					const clientCommands = {
 						returnBuffer: buffer => {
 							Draw.geometryBuffer = new DataView(buffer);
-						}
+						},
 					}
 					const workerURL = URL.createObjectURL(blob);
 					Draw.worker = new Worker(workerURL);
 					Draw.worker.onmessage = message => {
 						const data = message.data;
-						clientCommands[data.shift()](...data);
+						/** @type {Record<any, any>} */(clientCommands)[data.shift()](...data);
 					};
 
 					// Inject our own canvas implementation
 					/** @type {HTMLCanvasElement?} */
 					let oldCanvas = null;
-					oldCanvas = /** @type {HTMLCanvasElement} */(ig.system.canvas);
+					oldCanvas = Bindings.ig.system.canvas;
 					Draw.canvas = document.createElement("canvas");
 					Draw.canvas.id = oldCanvas.id;
 					Draw.canvas.style.cssText = oldCanvas.style.cssText;
@@ -961,7 +1178,7 @@ ig.module("plugins.plentyland.graphics").requires(
 					oldCanvas.parentNode?.insertBefore(Draw.canvas, oldCanvas);
 					oldCanvas.parentNode?.removeChild(oldCanvas);
 					oldCanvas = null;
-					ig.system.canvas = Draw.canvas;
+					Bindings.ig.system.canvas = Draw.canvas;
 
 					/** @type {HTMLCanvasElement} */
 					const offscreenCanvas = /** @type {any} */(Draw.canvas)
@@ -1146,7 +1363,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		list = new Float64Array(8);
 
 		static initialize() {
-			ig.BackgroundMap.inject({
+			Bindings.ig.BackgroundMap.inject({
 				/**
 				 * @this {{
 				 * 		pl_previousX?: number,
@@ -1156,16 +1373,16 @@ ig.module("plugins.plentyland.graphics").requires(
 				 * }}
 				 */
 				draw: function () {
-					const scrollX = this.scroll.x + ig.game.O598.originX;
-					const scrollY = this.scroll.y + ig.game.O598.originY;
+					const scrollX = this.scroll.x + Bindings.ig.game.pl_foregroundMap.originX;
+					const scrollY = this.scroll.y + Bindings.ig.game.pl_foregroundMap.originY;
 					const previousX = this.pl_previousX ?? scrollX;
 					const previousY = this.pl_previousY ?? scrollY;
 					const savedDeltaX = Interpolation.deltaX;
 					const savedDeltaY = Interpolation.deltaY;
 					Interpolation.deltaX =
-						(previousX - scrollX) * Draw.xToScreenX * ig.system.scale;
+						(previousX - scrollX) * Draw.xToScreenX * Bindings.ig.system.scale;
 					Interpolation.deltaY =
-						(previousY - scrollY) * Draw.yToScreenY * ig.system.scale;
+						(previousY - scrollY) * Draw.yToScreenY * Bindings.ig.system.scale;
 					this.parent();
 					this.pl_previousX = scrollX;
 					this.pl_previousY = scrollY;
@@ -1179,9 +1396,10 @@ ig.module("plugins.plentyland.graphics").requires(
 			const interpolationFactor = Interpolation.updatesPerSecond / 1000;
 
 			// Replace game loop
-			ig[plentyland.cancelLoop](ig.system[plentyland.cancelId]);
+			Bindings.ig.system.pl_stop();
+			Bindings.ig.system.running = true;
 			function gameLoop() {
-				ig.system.run();
+				Bindings.ig.system.run();
 				Draw.finalize(Interpolation.currentTick * msPerTick, interpolationFactor);
 				Interpolation.currentTick++;
 				let waitTime = msPerTick * Interpolation.currentTick - Date.now();
@@ -1194,7 +1412,7 @@ ig.module("plugins.plentyland.graphics").requires(
 
 			Interpolation.currentTick = Math.ceil(Date.now() / msPerTick);
 			setTimeout(gameLoop, msPerTick * Interpolation.currentTick - Date.now());
-			Object.defineProperties(ig.system, {
+			Object.defineProperties(Bindings.ig.system, {
 				tick: {
 					get: function () { return deltaTime; }
 				},
@@ -1209,7 +1427,10 @@ ig.module("plugins.plentyland.graphics").requires(
 			 * }} HasInterpolation
 			 */
 
-			const excludeDraw = new Set([window.MLand.prototype, window.Item.prototype]);
+			const excludeDraw = new Set([
+				Object.getPrototypeOf(Bindings.ig.game),
+				Bindings.self.Item.prototype
+			]);
 
 			// Inject interpolation tracking into Manyland's draw functions.
 			for (const key in window) {
@@ -1247,17 +1468,17 @@ ig.module("plugins.plentyland.graphics").requires(
 			}
 
 			// Get updates for every game draw.
-			MLand.inject({
+			Bindings.self.MLand.inject({
 				draw: function () {
 					Draw.updateScreenTransform();
-					const screenX = ig.game.screen.x;
-					const screenY = ig.game.screen.y;
+					const screenX = Bindings.ig.game.screen.x;
+					const screenY = Bindings.ig.game.screen.y;
 					Interpolation.deltaX =
 						(Interpolation.previousScreenX - screenX) *
-						Draw.xToScreenX * ig.system.scale;
+						Draw.xToScreenX * Bindings.ig.system.scale;
 					Interpolation.deltaY =
 						(Interpolation.previousScreenY - screenY) *
-						Draw.yToScreenY * ig.system.scale;
+						Draw.yToScreenY * Bindings.ig.system.scale;
 					Interpolation.previousScreenX = screenX;
 					Interpolation.previousScreenY = screenY;
 					this.parent();
@@ -1341,6 +1562,7 @@ ig.module("plugins.plentyland.graphics").requires(
 		static updatesPerSecond = 20;
 	}
 
+	Bindings.ig.game.pl_player.say("plentyland active");
 	initializeAudio();
 	Draw.initialize().then(() => {
 		Interpolation.initialize();
