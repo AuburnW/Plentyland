@@ -4,7 +4,7 @@
 		"target": "ES2021",
 		"noUncheckedIndexedAccess": true,
 		"strictNullChecks": true,
-		"module": "CommonJS",
+		"module": "es2022",
 		"moduleResolution": "node",
 		"types": [
 			"node"

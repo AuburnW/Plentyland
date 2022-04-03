@@ -18,7 +18,7 @@ const api = (self.chrome || browser);
 						/** @type {any} */(window).plentylandRoot = root;
 						const script = document.createElement("script");
 						script.type = "module";
-						script.src = String(new URL("a.js", root));
+						script.src = String(new URL("src/client.js", root));
 						document.head.appendChild(script);
 					},
 					args: [api.runtime.getURL("/")],
