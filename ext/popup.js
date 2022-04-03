@@ -10,6 +10,10 @@ const api = (self.chrome || browser);
 			([tab]) => {
 				api.scripting.executeScript({
 					target: { tabId: tab.id },
+					/**
+					 * 
+					 * @param {string} root 
+					 */
 					func: root => {
 						/** @type {any} */(window).plentylandRoot = root;
 					},

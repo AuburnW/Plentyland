@@ -287,7 +287,7 @@
 
 	self.addEventListener("message", message => {
 		const data = message.data;
-		workerCommands[data.shift()](...data);
+		/** @type {any} */(workerCommands)[data.shift()](...data);
 	});
 	function render() {
 		let interpolation = Math.min(
