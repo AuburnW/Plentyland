@@ -16,15 +16,14 @@ const api = (self.chrome || browser);
 					 */
 					func: root => {
 						/** @type {any} */(window).plentylandRoot = root;
+						const script = document.createElement("script");
+						script.type = "module";
+						script.src = String(new URL("a.js", root));
+						document.head.appendChild(script);
 					},
 					args: [api.runtime.getURL("/")],
 					world: "MAIN"
 				});
-				api.scripting.executeScript({
-					target: { tabId: tab.id },
-					files: ["a.js"],
-					world: "MAIN"
-				})
 			}
 		);
 	});

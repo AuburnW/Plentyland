@@ -1160,7 +1160,7 @@
 						},
 					}
 					const workerURL = URL.createObjectURL(blob);
-					Draw.worker = new Worker(workerURL);
+					Draw.worker = new Worker(workerURL, { type: "module" });
 					Draw.worker.onmessage = message => {
 						const data = message.data;
 						/** @type {Record<any, any>} */(clientCommands)[data.shift()](...data);
@@ -1568,9 +1568,3 @@
 		Interpolation.initialize();
 	});
 });
-
-/** 
- * @typedef {{
- * 		returnBuffer: (buffer: ArrayBuffer) => void
- * }} ClientCommands
- */
