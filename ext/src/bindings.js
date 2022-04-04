@@ -39,7 +39,25 @@ export class Bindings {
 			/ig ?\.[a-zA-Z0-9$_]+ ?\( ?this ?\. ?[a-zA-Z0-9$_]+ ?\).*this ?\. ?running ?=/g,
 			"pl_stop"
 		);
-
+		Bindings.bindByCriteria(
+			[Bindings.ig.game.pl_player],
+			"pl_speech",
+			Bindings.self.SpeechDisplay,
+			[],
+			[Object.getPrototypeOf(Bindings.ig.game.pl_player)]
+		);
+		Bindings.bindByCriteria(
+			[Bindings.self.SpeechDisplay.prototype],
+			"pl_lines",
+			Array,
+			[],
+		);
+		Bindings.bindByCriteria(
+			[Bindings.self.SpeechDisplayLine.prototype],
+			"pl_text",
+			"string",
+			[],
+		);
 	}
 
 	/**
@@ -144,10 +162,12 @@ export class Bindings {
 				}
 
 				// Remove candidates that don't have the given keys.
-				for (const key of keys) {
-					if (!(key in value)) {
-						candidates.delete(candidate);
-						continue outer;
+				if (value instanceof Object) {
+					for (const key of keys) {
+						if (!(key in value)) {
+							candidates.delete(candidate);
+							continue outer;
+						}
 					}
 				}
 			}
@@ -202,15 +222,25 @@ export class Bindings {
 
 /**
  * @typedef {Function & {
- * 		inject: (injection: Record<string, any>) => void
+ * 		inject: (injection: Record<string, any>) => void,
+ * 		extend: (members: Record<string, any>) => ImpactClass
  * }} ImpactClass
+ */
+
+/**
+ * @typedef {{
+ * 		moving: boolean,
+ * 		pl_text: string
+ * }} SpeechDisplayLine
  */
 
 /**
  * @typedef {{
  * 		plentylandRoot?: string,
  * 		Item: ImpactClass,
- * 		MLand: ImpactClass
+ * 		MLand: ImpactClass,
+ * 		SpeechDisplayLine: ImpactClass,
+ * 		SpeechDisplay: ImpactClass
  * }} ManylandGlobalScope
  */
 
@@ -237,8 +267,9 @@ export class Bindings {
  * 			},
  * 			pl_player: {
  * 				say: (message: string) => void,
- * 				attachments: Record<string, Attachment>
- * 				pl_getWearableAttribute: (attribute: string) => boolean
+ * 				attachments: Record<string, Attachment>,
+ * 				pl_getWearableAttribute: (attribute: string) => boolean,
+ * 				pl_speech: { pl_lines: SpeechDisplayLine[] }?,
  * 			},
  * 			brainManager: {
  * 				pl_onPlaySound: (path: string) => void
@@ -247,7 +278,8 @@ export class Bindings {
  * 				originX: number,
  * 				originY: number,
  * 			},
- * 			screen: { x: number, y: number }
+ * 			screen: { x: number, y: number },
+ * 			spawnEntity: (type: ImpactClass, x: number, y: number) => any
  * 		},
  * 		system: {
  * 			context: CanvasRenderingContext2D,
@@ -255,7 +287,8 @@ export class Bindings {
  * 			running: boolean,
  * 			scale: number,
  * 			pl_stop: () => void,
- * 			run: () => void
+ * 			run: () => void,
+ * 			tick: number,
  * 		},
  * 		BackgroundMap: ImpactClass,
  * }} ImpactGameEngine

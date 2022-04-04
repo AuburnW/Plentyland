@@ -1,7 +1,7 @@
 import { Bindings } from "./bindings.js";
 import { initializeAudio } from "./audio.js";
-import { Draw } from "./draw.js";
 import { Interpolation } from "./interpolation.js";
+import { Settings } from "./settings.js";
 
 /** @type {any} */(window).ig.module("plugins.plentyland").requires(
 	"impact.sound",
@@ -10,8 +10,7 @@ import { Interpolation } from "./interpolation.js";
 ).defines(() => {
 	Bindings.initialize();
 	Bindings.ig.game.pl_player.say("plentyland active");
+	Settings.initialize();
 	initializeAudio();
-	Draw.initialize().then(() => {
-		Interpolation.initialize();
-	});
+	Interpolation.initialize();
 });

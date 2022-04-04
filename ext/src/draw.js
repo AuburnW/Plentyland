@@ -4,7 +4,11 @@ import { Atlas } from "./atlas.js";
 import { DrawContext } from "./draw-context.js";
 
 export class Draw {
-	static initialize() {
+	static enable() {
+		if (Draw.enabled) {
+			throw new Error("Draw already enabled.");
+		}
+		Draw.enabled = true;
 		const root = String(
 			Bindings.self.plentylandRoot ??
 			"https://auburn557.github.io/Plentyland/ext/"
@@ -26,17 +30,16 @@ export class Draw {
 				};
 
 				// Inject our own canvas implementation
-				/** @type {HTMLCanvasElement?} */
-				let oldCanvas = null;
-				oldCanvas = Bindings.ig.system.canvas;
+				Draw.originalCanvas = Bindings.ig.system.canvas;
 				Draw.canvas = document.createElement("canvas");
-				Draw.canvas.id = oldCanvas.id;
-				Draw.canvas.style.cssText = oldCanvas.style.cssText;
-				Draw.canvas.width = oldCanvas.width;
-				Draw.canvas.height = oldCanvas.height;
-				oldCanvas.parentNode?.insertBefore(Draw.canvas, oldCanvas);
-				oldCanvas.parentNode?.removeChild(oldCanvas);
-				oldCanvas = null;
+				Draw.canvas.id = Draw.originalCanvas.id;
+				Draw.canvas.style.cssText = Draw.originalCanvas.style.cssText;
+				Draw.canvas.width = Draw.originalCanvas.width;
+				Draw.canvas.height = Draw.originalCanvas.height;
+				Draw.originalCanvas.parentNode?.insertBefore(Draw.canvas, Draw.originalCanvas);
+				Draw.originalCanvas.parentNode?.removeChild(Draw.originalCanvas);
+				Draw.originalCanvas.width = 1;
+				Draw.originalCanvas.height = 1;
 				Bindings.ig.system.canvas = Draw.canvas;
 				Bindings.ig.system.context = /** @type {any} */(new DrawContext());
 
@@ -50,6 +53,29 @@ export class Draw {
 					Atlas.sizeMagnitude
 				);
 			});
+	}
+
+	static disable() {
+		if (!Draw.enabled) {
+			throw new Error("Draw already disabled");
+		}
+		Draw.enabled = false;
+		Draw.worker?.terminate();
+		Draw.worker = null;
+		Draw.geometryBuffer = new DataView(new ArrayBuffer(Draw.vertexBufferSize));
+		if (Draw.originalCanvas) {
+			Draw.originalCanvas.width = Draw.originalWidth;
+			Draw.originalCanvas.height = Draw.originalHeight;
+			Bindings.ig.system.canvas.parentNode?.insertBefore(
+				Bindings.ig.system.canvas,
+				Draw.originalCanvas
+			);
+			Bindings.ig.system.canvas.parentNode?.removeChild(Bindings.ig.system.canvas);
+			Bindings.ig.system.canvas = Draw.originalCanvas;
+			Bindings.ig.system.context =
+				/** @type {CanvasRenderingContext2D} */
+				(Bindings.ig.system.canvas.getContext("2d"));
+		}
 	}
 
 	/**
@@ -210,8 +236,15 @@ export class Draw {
 	/** @type {HTMLCanvasElement?} */
 	static canvas = null;
 
+	/** @type {HTMLCanvasElement?} */
+	static originalCanvas = null;
+	static originalWidth = 0;
+	static originalHeight = 0;
+
 	static xToScreenX = 0;
 	static yToScreenY = 0;
 	static xOffset = 0;
 	static yOffset = 0;
+
+	static enabled = false;
 }

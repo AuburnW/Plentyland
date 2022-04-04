@@ -1,4 +1,5 @@
 import { Bindings } from "./bindings.js";
+import { Settings } from "./settings.js";
 
 /**
  * Describes `ig.Sound` with Plentyland's modifications.
@@ -8,7 +9,8 @@ import { Bindings } from "./bindings.js";
  * 		volume: number,
  * 		play: (this: PlentySound) => void,
  * 		stop: (this: PlentySound) => void,
- * 		load: (this: PlentySound) => void
+ * 		load: (this: PlentySound) => void,
+ * 		parent: (...args: any[]) => any,
  * }} PlentySound 
  */
 
@@ -41,12 +43,20 @@ class SoundInfo {
 	 * that the compressor doesn't kick in as often.
 	 */
 	static globalGain = 0.4;
+
+	static enabled = false;
 }
 
 export function initializeAudio() {
 	if (!Bindings.ig.Sound.enabled || !window.AudioContext || !window.Promise) {
 		return;
 	}
+
+	function checkEnable() {
+		SoundInfo.enabled = Settings.get("audio") === "fixed";
+	}
+	checkEnable();
+	Settings.onChange("audio", checkEnable);
 
 	// Choose a compatible audio extension, mirroring Impact's method
 	let extension = "";
@@ -113,6 +123,9 @@ export function initializeAudio() {
 
 	Bindings.ig.Sound.inject(/** @type {Partial<PlentySound>} */({
 		load: function () {
+			if (!SoundInfo.enabled) {
+				return this.parent(...arguments);
+			}
 			const info = SoundInfo.get(this);
 			// Load the sounds associated with this sound's group.
 			const group = info.group;
@@ -150,6 +163,9 @@ export function initializeAudio() {
 			}
 		},
 		play: function () {
+			if (!SoundInfo.enabled) {
+				return this.parent(...arguments);
+			}
 			if (
 				Bindings.ig.game.settings.doPlaySound &&
 				!Bindings.ig.game.pl_player.pl_getWearableAttribute("mutesAll") &&
@@ -192,6 +208,9 @@ export function initializeAudio() {
 			}
 		},
 		stop: function () {
+			if (!SoundInfo.enabled) {
+				return this.parent(...arguments);
+			}
 			const info = SoundInfo.get(this);
 			// Prevent any currently loading sounds from playing
 			info.played = false;

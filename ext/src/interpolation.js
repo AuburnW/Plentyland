@@ -1,5 +1,6 @@
 import { Bindings } from "./bindings.js";
 import { Draw } from "./draw.js";
+import { Settings } from "./settings.js";
 
 export class Interpolation {
 	lastTick = 0;
@@ -18,59 +19,36 @@ export class Interpolation {
 			 * }}
 			 */
 			draw: function () {
-				const scrollX = this.scroll.x + Bindings.ig.game.pl_foregroundMap.originX;
-				const scrollY = this.scroll.y + Bindings.ig.game.pl_foregroundMap.originY;
-				const previousX = this.pl_previousX ?? scrollX;
-				const previousY = this.pl_previousY ?? scrollY;
-				const savedDeltaX = Interpolation.deltaX;
-				const savedDeltaY = Interpolation.deltaY;
-				Interpolation.deltaX =
-					(previousX - scrollX) * Draw.xToScreenX * Bindings.ig.system.scale;
-				Interpolation.deltaY =
-					(previousY - scrollY) * Draw.yToScreenY * Bindings.ig.system.scale;
-				this.parent();
-				this.pl_previousX = scrollX;
-				this.pl_previousY = scrollY;
-				Interpolation.deltaX = savedDeltaX;
-				Interpolation.deltaY = savedDeltaY;
+				if (Interpolation.enabled) {
+					const scrollX = this.scroll.x + Bindings.ig.game.pl_foregroundMap.originX;
+					const scrollY = this.scroll.y + Bindings.ig.game.pl_foregroundMap.originY;
+					const previousX = this.pl_previousX ?? scrollX;
+					const previousY = this.pl_previousY ?? scrollY;
+					const savedDeltaX = Interpolation.deltaX;
+					const savedDeltaY = Interpolation.deltaY;
+					Interpolation.deltaX =
+						(previousX - scrollX) * Draw.xToScreenX * Bindings.ig.system.scale;
+					Interpolation.deltaY =
+						(previousY - scrollY) * Draw.yToScreenY * Bindings.ig.system.scale;
+					this.parent();
+					this.pl_previousX = scrollX;
+					this.pl_previousY = scrollY;
+					Interpolation.deltaX = savedDeltaX;
+					Interpolation.deltaY = savedDeltaY;
+				} else {
+					this.parent();
+				}
 			}
 		});
 
-		const msPerTick = 1000 / Interpolation.updatesPerSecond;
 		const deltaTime = 1 / Interpolation.updatesPerSecond;
-		const interpolationFactor = Interpolation.updatesPerSecond / 1000;
-
-		// Replace game loop
-		Bindings.ig.system.pl_stop();
-		Bindings.ig.system.running = true;
-		function gameLoop() {
-			Bindings.ig.system.run();
-			Draw.finalize(Interpolation.currentTick * msPerTick, interpolationFactor);
-			Interpolation.currentTick++;
-			let waitTime = msPerTick * Interpolation.currentTick - Date.now();
-			if (waitTime < -500) {
-				Interpolation.currentTick = Math.ceil(Date.now() / msPerTick);
-				waitTime = msPerTick * Interpolation.currentTick - Date.now();
-			}
-			setTimeout(gameLoop, waitTime);
-		}
-
-		Interpolation.currentTick = Math.ceil(Date.now() / msPerTick);
-		setTimeout(gameLoop, msPerTick * Interpolation.currentTick - Date.now());
+		let tick = Bindings.ig.system.tick;
 		Object.defineProperties(Bindings.ig.system, {
 			tick: {
-				get: function () { return deltaTime; }
+				get: function () { return Interpolation.enabled ? deltaTime : tick; },
+				set: function (value) { tick = value; }
 			},
-			fps: {
-				get: function () { return 60; }
-			}
 		});
-
-		/**
-		 * @typedef {{
-		 * 		pl_interpolation?: Interpolation
-		 * }} HasInterpolation
-		 */
 
 		const excludeDraw = new Set([
 			Object.getPrototypeOf(Bindings.ig.game),
@@ -94,41 +72,79 @@ export class Interpolation {
 			 * }}
 			 */
 			prototype.draw = function () {
-				let interpolation = this.pl_interpolation;
-				if (!interpolation) {
-					interpolation = this.pl_interpolation = new Interpolation();
-				}
-				if (interpolation.lastTick < Interpolation.currentTick) {
-					interpolation.index = 0;
-					if (interpolation.lastTick < Interpolation.currentTick - 1) {
-						interpolation.count = 0;
+				if (Interpolation.enabled) {
+					let interpolation = this.pl_interpolation;
+					if (!interpolation) {
+						interpolation = this.pl_interpolation = new Interpolation();
 					}
+					if (interpolation.lastTick < Interpolation.currentTick) {
+						interpolation.index = 0;
+						if (interpolation.lastTick < Interpolation.currentTick - 1) {
+							interpolation.count = 0;
+						}
+					}
+					const savedInterpolation = Interpolation.current;
+					Interpolation.current = interpolation;
+					draw.apply(this, arguments);
+					Interpolation.current.lastTick = Interpolation.currentTick;
+					Interpolation.current = savedInterpolation;
+				} else {
+					draw.apply(this, arguments);
 				}
-				const savedInterpolation = Interpolation.current;
-				Interpolation.current = interpolation;
-				draw.apply(this, arguments);
-				Interpolation.current.lastTick = Interpolation.currentTick;
-				Interpolation.current = savedInterpolation;
 			}
 		}
 
 		// Get updates for every game draw.
 		Bindings.self.MLand.inject({
+			update: function () {
+				this.parent();
+				for (const callback of Interpolation.tickListeners) {
+					callback();
+				}
+			},
 			draw: function () {
-				Draw.updateScreenTransform();
-				const screenX = Bindings.ig.game.screen.x;
-				const screenY = Bindings.ig.game.screen.y;
-				Interpolation.deltaX =
-					(Interpolation.previousScreenX - screenX) *
-					Draw.xToScreenX * Bindings.ig.system.scale;
-				Interpolation.deltaY =
-					(Interpolation.previousScreenY - screenY) *
-					Draw.yToScreenY * Bindings.ig.system.scale;
-				Interpolation.previousScreenX = screenX;
-				Interpolation.previousScreenY = screenY;
+				if (Interpolation.enabled) {
+					Draw.updateScreenTransform();
+					const screenX = Bindings.ig.game.screen.x;
+					const screenY = Bindings.ig.game.screen.y;
+					Interpolation.deltaX =
+						(Interpolation.previousScreenX - screenX) *
+						Draw.xToScreenX * Bindings.ig.system.scale;
+					Interpolation.deltaY =
+						(Interpolation.previousScreenY - screenY) *
+						Draw.yToScreenY * Bindings.ig.system.scale;
+					Interpolation.previousScreenX = screenX;
+					Interpolation.previousScreenY = screenY;
+				}
 				this.parent();
 			}
 		});
+		Settings.set("graphics", "original");
+		function checkEnable() {
+			if (Settings.get("graphics") === "fast") {
+				Interpolation.enable();
+			} else {
+				if (Interpolation.enabled) {
+					Interpolation.disable();
+				}
+			}
+		}
+		checkEnable();
+		Settings.onChange("graphics", checkEnable);
+	}
+
+	static enable() {
+		if (Interpolation.enabled) { throw new Error("Interpolation already enabled.") }
+		Draw.enable().then(() => {
+			Interpolation.enabled = true;
+			Interpolation.startGameLoop();
+		});
+	}
+
+	static disable() {
+		if (!Interpolation.enabled) { throw new Error("Interpolation already disabled.") }
+		this.enabled = false;
+		Draw.disable();
 	}
 
 	/**
@@ -181,6 +197,42 @@ export class Interpolation {
 		}
 	}
 
+	/**
+	 * @param {() => void} callback
+	 */
+	static onTick(callback) {
+		Interpolation.tickListeners.push(callback);
+	}
+
+	/** @private */
+	static startGameLoop() {
+		const msPerTick = 1000 / Interpolation.updatesPerSecond;
+		const interpolationFactor = Interpolation.updatesPerSecond / 1000;
+
+		Bindings.ig.system.pl_stop();
+		Bindings.ig.system.running = true;
+		function gameLoop() {
+			Bindings.ig.system.run();
+			Draw.finalize(Interpolation.currentTick * msPerTick, interpolationFactor);
+			Interpolation.currentTick++;
+			let waitTime = msPerTick * Interpolation.currentTick - Date.now();
+			if (waitTime < -500) {
+				Interpolation.currentTick = Math.ceil(Date.now() / msPerTick);
+				waitTime = msPerTick * Interpolation.currentTick - Date.now();
+			}
+			Interpolation.timeoutId = /** @type {any} */(setTimeout(gameLoop, waitTime));
+		}
+
+		Interpolation.currentTick = Math.ceil(Date.now() / msPerTick);
+		Interpolation.timeoutId =
+			/** @type {any} */
+			(setTimeout(gameLoop, msPerTick * Interpolation.currentTick - Date.now()));
+	}
+
+	static cancelGameLoop() {
+		clearTimeout(Interpolation.timeoutId);
+	}
+
 	/** @private */
 	static previousScreenX = 0;
 	/** @private */
@@ -205,4 +257,16 @@ export class Interpolation {
 	 * @readonly
 	 */
 	static updatesPerSecond = 20;
+
+	/**
+	 * @private
+	 * @readonly
+	 * @type {(() => void)[]}
+	 */
+	static tickListeners = [];
+
+	static enabled = false;
+
+	/** @private */
+	static timeoutId = -1;
 }
